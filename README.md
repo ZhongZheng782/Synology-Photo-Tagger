@@ -145,6 +145,10 @@
 
 > Synology Photos 內部資料庫可協助找出候選媒體，但不是本工具的標籤寫入目標。
 
+## 參考實作
+
+- [eleonne/synology-tagger](https://github.com/eleonne/synology-tagger)：以機器學習擴充 Synology Photos 搜尋的開源實作。它將分類結果寫入 Synology Photos 的 `general_tag` 與 `many_unit_has_many_general_tag` 資料表；本專案僅將其作為設計參考，仍採 metadata-first 策略，不直接寫入 Synology Photos 內部資料庫。
+
 ## MVP 範圍
 
 第一個可驗證版本只完成 UC-01：
