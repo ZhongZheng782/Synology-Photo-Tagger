@@ -256,6 +256,7 @@
 ## 參考實作
 
 - [eleonne/synology-tagger](https://github.com/eleonne/synology-tagger)：以機器學習擴充 Synology Photos 搜尋的開源實作。它將分類結果寫入 Synology Photos 的 `general_tag` 與 `many_unit_has_many_general_tag` 資料表；本專案僅將其作為設計參考，仍採 metadata-first 策略，不直接寫入 Synology Photos 內部資料庫。
+- [zeichensatz/SynologyPhotosAPI](https://github.com/zeichensatz/SynologyPhotosAPI)：Synology Photos API 的非官方探索文件，供 API 探測與整合設計參考；內容尚不完整，實際支援的 API 與參數仍須在目標 NAS 上驗證。
 
 ## MVP 範圍
 
@@ -268,3 +269,24 @@
 - 驗證標籤在 Synology Photos 中可搜尋。
 
 暫不納入：影片標註、任意自然語言 taxonomy、大量舊相片全庫掃描，以及任何直接寫入 Synology Photos 資料庫的做法。
+
+## Docker 開發版
+
+目前容器提供繁體中文 Web 首頁與唯讀 Synology Photos API 探測；`synology-api` Python 套件已安裝在映像中，供後續 API 整合驗證。首頁會列出 DSM 回報的 `SYNO.Foto.*` 與 `SYNO.FotoTeam.*` 模組。這一版尚未登入 NAS、讀取照片或執行 AI 標記。
+
+1. 複製 `.env.example` 為 `.env`，填入 NAS 的 DSM 根網址與照片目錄路徑。`SYNOLOGY_URL` 必須使用可由 NAS 容器連線、且 TLS 憑證可驗證的網址。
+2. 執行 `docker compose up -d --build`。
+3. 瀏覽 `http://NAS_IP:5056`；可用 `WEB_PORT` 調整對外埠號。
+
+Compose 預設將個人空間 `/volume1/homes/wjlee/Photos` 唯讀掛載至容器的 `/Photos`。如 NAS 帳號或路徑不同，請調整 `PHOTO_LIBRARY_PATH`。`publish-image.yml` 可由 GitHub Actions 手動觸發，將多架構映像發佈至 `wenchiehlee1020/synology-photo-tagger`；需要設定 `DOCKERHUB_USERNAME` 與 `DOCKERHUB_TOKEN` repository secrets。
+
+### Debug shell
+
+需要直接進入容器執行 `/bin/sh` 或 `/bin/bash` 時，將 `.env` 的 `DEBUG_SHELL` 設為 `true`。先在 `DEBUG_SSH_DIR` 指向的 NAS 目錄建立 `authorized_keys`，放入可信任的 SSH **公鑰**，再重新建立容器。SSH 僅接受公鑰；主機端 debug 埠只綁定 `127.0.0.1`，不會直接暴露在區網。從遠端電腦先建立 NAS SSH port-forward，再連線至容器：
+
+```sh
+ssh -N -L 2223:127.0.0.1:2223 <NAS-username>@<NAS-host>
+ssh -i <private-key> -p 2223 root@127.0.0.1
+```
+
+若使用不同 `DEBUG_SSH_PORT`，請同步調整第一行本機轉送埠與第二行連線埠。完成除錯後將 `DEBUG_SHELL` 設回 `false` 並重新建立容器；一般模式不會啟動容器內的 SSH server。
