@@ -53,11 +53,11 @@
       <section class="content-grid" id="connection">
         <article class="panel connection-panel">
           <div class="panel-heading"><div><p class="eyebrow">STEP 01 · CONNECTION</p><h2>連接你的照片庫</h2></div><span class="heading-icon">⌁</span></div>
-          <p class="panel-copy">先確認 NAS 可回應 Photos API。這項探測只讀取 API 清單，不需要輸入帳號或密碼。</p>
+          <p class="panel-copy">先確認 NAS 可回應 Photos API，再以 NAS 帳號登入讀取照片清單。此版本僅使用唯讀清單 API。</p>
           <div class="connection-details">
             <div class="detail-row"><span>DSM 位址</span><strong class="mono">{% if base_url %}{{ base_url }}{% else %}尚未設定{% endif %}</strong></div>
             <div class="detail-row"><span>照片 API SDK</span><strong><span class="sdk-mark">Py</span> synology-api <span class="version-chip">{{ sdk_version }}</span></strong></div>
-            <div class="detail-row"><span>驗證方式</span><strong>唯讀 API 探測</strong></div>
+            <div class="detail-row"><span>照片存取</span><strong>登入後唯讀列出</strong></div>
           </div>
           <div class="panel-actions"><button class="primary-button" id="discover-button" {% if not base_url %}disabled{% endif %}><span class="button-spark">✦</span>探索 Photos API<span class="button-arrow">→</span></button><span class="action-caption">約需數秒</span></div>
           {% if not base_url %}<div class="inline-hint"><span>ⓘ</span><div><strong>尚未設定 NAS 網址</strong><br>請在 Compose 設定 <code>SYNOLOGY_URL</code>，例如 <code>https://NAS 主機:埠號</code>。</div></div>{% endif %}
@@ -76,6 +76,41 @@
         <div class="module-groups"><div><h3><span class="group-dot personal"></span>個人空間 <span id="personal-count"></span></h3><ul id="personal-modules"></ul></div><div><h3><span class="group-dot shared"></span>共享空間 <span id="shared-count"></span></h3><ul id="shared-modules"></ul></div></div>
       </section>
 
+      <section class="content-grid auth-grid" id="auth-panel">
+        <article class="panel connection-panel">
+          <div class="panel-heading"><div><p class="eyebrow">STEP 02 · READ ONLY ACCESS</p><h2>登入並瀏覽候選照片</h2></div><span class="heading-icon">⌕</span></div>
+          <p class="panel-copy">登入後可讀取個人空間或共享空間的照片項目、拍攝時間、地點與既有標籤。密碼不會寫入本專案資料庫或記錄檔。</p>
+          <form id="login-form" {% if logged_in %}hidden{% endif %}>
+            <label class="field-label" for="nas-username">NAS 帳號</label>
+            <input class="text-field" id="nas-username" name="username" autocomplete="username" required>
+            <label class="field-label" for="nas-password">NAS 密碼</label>
+            <input class="text-field" id="nas-password" name="password" type="password" autocomplete="current-password" required>
+            <label class="field-label" for="nas-otp">雙重驗證碼 <span>如帳號有啟用</span></label>
+            <input class="text-field otp-field" id="nas-otp" name="otp_code" inputmode="numeric" autocomplete="one-time-code" maxlength="8">
+            <button class="primary-button auth-submit" type="submit" {% if not base_url %}disabled{% endif %}>安全登入 NAS <span class="button-arrow">→</span></button>
+          </form>
+          <div class="logged-in-row" id="logged-in-row" {% if not logged_in %}hidden{% endif %}>
+            <span class="login-indicator"><i></i>NAS 工作階段已連線</span>
+            <button class="secondary-button" id="logout-button" type="button">登出</button>
+          </div>
+          <div class="security-hint"><strong>連線提醒</strong><span>瀏覽器到此 Web UI 使用 HTTP。請只在可信任的區域網路或 SSH tunnel 中輸入 NAS 密碼；瀏覽器到 NAS API 的連線使用已驗證的 HTTPS。</span></div>
+          <div class="result-box" id="auth-result" hidden aria-live="polite"></div>
+        </article>
+        <aside class="mini-panel privacy-panel browse-note"><div class="privacy-heading"><span>◈</span><strong>唯讀照片瀏覽</strong></div><p>目前不會修改標籤、相片檔案或 Synology Photos 資料庫。地點篩選只會比對目前載入的這一頁。</p><div class="privacy-foot"><span></span>每頁最多 100 張</div></aside>
+      </section>
+
+      <section class="module-panel photo-panel" id="photo-browser" {% if not logged_in %}hidden{% endif %}>
+        <div class="module-heading"><div><p class="eyebrow">PHOTO CANDIDATES</p><h2>照片候選清單</h2></div><span class="module-count" id="photo-count">尚未載入</span></div>
+        <div class="photo-controls">
+          <label>空間<select id="space-select"><option value="personal">個人空間</option><option value="shared">共享空間</option></select></label>
+          <label>地點<select id="country-select"><option value="">全部地點</option><option value="japan">日本</option></select></label>
+          <label>每頁<select id="limit-select"><option>24</option><option selected>48</option><option>100</option></select></label>
+          <button class="primary-button" id="load-photos" type="button">載入照片 <span class="button-arrow">→</span></button>
+        </div>
+        <div class="photo-list" id="photo-list" aria-live="polite"><div class="photo-empty">登入後載入照片清單。</div></div>
+        <div class="photo-pagination"><span id="page-label">—</span><div><button class="secondary-button" id="prev-page" type="button" disabled>上一頁</button><button class="secondary-button" id="next-page" type="button" disabled>下一頁</button></div></div>
+      </section>
+
       <footer class="footer"><span>Synology Photo Tagger <span class="footer-sep">·</span> API exploration build</span><span>照片與標籤由你掌控 <span class="footer-heart">✦</span></span></footer>
     </main>
   </div>
@@ -84,6 +119,12 @@
     const button = document.getElementById('discover-button');
     const resultBox = document.getElementById('result-box');
     const modulePanel = document.getElementById('modules');
+    const authResult = document.getElementById('auth-result');
+    const loginForm = document.getElementById('login-form');
+    const loggedInRow = document.getElementById('logged-in-row');
+    const photoBrowser = document.getElementById('photo-browser');
+    let photoOffset = 0;
+    let photoHasMore = false;
 
     function showResult(message, kind) {
       resultBox.hidden = false;
@@ -105,6 +146,86 @@
         const item = document.createElement('li');
         item.textContent = value;
         list.append(item);
+      }
+    }
+
+    function showAuthResult(message, kind) {
+      authResult.hidden = false;
+      authResult.className = `result-box ${kind}`;
+      authResult.textContent = message;
+    }
+
+    async function loadPhotos(offset = 0) {
+      const list = document.getElementById('photo-list');
+      const loadButton = document.getElementById('load-photos');
+      const limit = Number(document.getElementById('limit-select').value);
+      const params = new URLSearchParams({
+        space: document.getElementById('space-select').value,
+        country: document.getElementById('country-select').value,
+        offset: String(offset),
+        limit: String(limit)
+      });
+      loadButton.disabled = true;
+      loadButton.innerHTML = '<span class="spinner"></span>正在讀取…';
+      list.replaceChildren(Object.assign(document.createElement('div'), { className: 'photo-empty', textContent: '正在從 NAS 讀取照片清單…' }));
+      try {
+        const response = await fetch(`/api/photos?${params}`);
+        const data = await response.json();
+        if (!data.ok) {
+          list.replaceChildren(Object.assign(document.createElement('div'), { className: 'photo-empty error-text', textContent: data.error || '讀取照片清單失敗。' }));
+          if (response.status === 401) {
+            loginForm.hidden = false;
+            loggedInRow.hidden = true;
+            photoBrowser.hidden = true;
+          }
+          return;
+        }
+        photoOffset = data.offset;
+        photoHasMore = data.has_more;
+        document.getElementById('photo-count').textContent = `${data.page_count} 張照片`;
+        document.getElementById('page-label').textContent = `第 ${Math.floor(data.offset / data.limit) + 1} 頁 · ${data.space === 'personal' ? '個人空間' : '共享空間'}${document.getElementById('country-select').value ? ' · 日本篩選' : ''}`;
+        document.getElementById('prev-page').disabled = data.offset === 0;
+        document.getElementById('next-page').disabled = !data.has_more;
+        list.replaceChildren();
+        if (!data.photos.length) {
+          list.append(Object.assign(document.createElement('div'), { className: 'photo-empty', textContent: '這一頁沒有符合條件的照片。可換空間、地點或前後頁再查看。' }));
+          return;
+        }
+        for (const photo of data.photos) {
+          const card = document.createElement('article');
+          card.className = 'photo-card';
+          const marker = document.createElement('div');
+          marker.className = 'photo-marker';
+          marker.textContent = photo.type === 'video' ? '▶' : '▧';
+          const body = document.createElement('div');
+          body.className = 'photo-card-body';
+          const title = document.createElement('strong');
+          title.className = 'photo-title';
+          title.textContent = photo.filename;
+          const meta = document.createElement('div');
+          meta.className = 'photo-meta';
+          const date = photo.time ? new Date(photo.time > 1e12 ? photo.time : photo.time * 1000) : null;
+          const dateText = date && !Number.isNaN(date.valueOf()) ? date.toLocaleDateString('zh-TW') : '拍攝時間未提供';
+          const place = [photo.city, photo.country].filter(Boolean).join(' · ') || '沒有地點資料';
+          meta.textContent = `${dateText}　·　${place}`;
+          body.append(title, meta);
+          if (photo.tags?.length) {
+            const tags = document.createElement('div');
+            tags.className = 'photo-tags';
+            tags.textContent = photo.tags.slice(0, 5).join('　');
+            body.append(tags);
+          }
+          const id = document.createElement('span');
+          id.className = 'photo-id';
+          id.textContent = `ID ${photo.id ?? '—'}`;
+          card.append(marker, body, id);
+          list.append(card);
+        }
+      } catch (error) {
+        list.replaceChildren(Object.assign(document.createElement('div'), { className: 'photo-empty error-text', textContent: '無法讀取照片清單，請確認 NAS 連線後重試。' }));
+      } finally {
+        loadButton.disabled = false;
+        loadButton.innerHTML = '載入照片 <span class="button-arrow">→</span>';
       }
     }
 
@@ -137,6 +258,69 @@
         button.innerHTML = '<span class="button-spark">✦</span>重新探索 Photos API<span class="button-arrow">→</span>';
       }
     });
+
+    loginForm?.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const submit = loginForm.querySelector('button[type="submit"]');
+      const formData = new FormData(loginForm);
+      submit.disabled = true;
+      submit.innerHTML = '<span class="spinner"></span>正在登入 NAS…';
+      authResult.hidden = true;
+      try {
+        const response = await fetch('/api/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            username: formData.get('username'),
+            password: formData.get('password'),
+            otp_code: formData.get('otp_code')
+          })
+        });
+        const data = await response.json();
+        if (!data.ok) {
+          showAuthResult(data.error || 'NAS 登入失敗。', 'error');
+          return;
+        }
+        showAuthResult(data.message, 'success');
+        loginForm.reset();
+        loginForm.hidden = true;
+        loggedInRow.hidden = false;
+        photoBrowser.hidden = false;
+        await loadPhotos(0);
+      } catch (error) {
+        showAuthResult('無法完成登入，請確認服務與 NAS 連線。', 'error');
+      } finally {
+        document.getElementById('nas-password').value = '';
+        document.getElementById('nas-otp').value = '';
+        submit.disabled = false;
+        submit.innerHTML = '安全登入 NAS <span class="button-arrow">→</span>';
+      }
+    });
+
+    document.getElementById('logout-button')?.addEventListener('click', async () => {
+      await fetch('/api/logout', { method: 'POST' });
+      loggedInRow.hidden = true;
+      loginForm.hidden = false;
+      photoBrowser.hidden = true;
+      showAuthResult('已登出 Synology Photos。', 'success');
+    });
+
+    document.getElementById('load-photos')?.addEventListener('click', () => loadPhotos(0));
+    document.getElementById('prev-page')?.addEventListener('click', () => {
+      const limit = Number(document.getElementById('limit-select').value);
+      loadPhotos(Math.max(0, photoOffset - limit));
+    });
+    document.getElementById('next-page')?.addEventListener('click', () => {
+      loadPhotos(photoOffset + Number(document.getElementById('limit-select').value));
+    });
+    for (const id of ['space-select', 'country-select', 'limit-select']) {
+      document.getElementById(id)?.addEventListener('change', () => {
+        if (!loginForm.hidden) return;
+        loadPhotos(0);
+      });
+    }
+
+    if (!loginForm.hidden) photoBrowser.hidden = true;
   </script>
 </body>
 </html>

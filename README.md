@@ -272,11 +272,16 @@
 
 ## Docker 開發版
 
-目前容器提供繁體中文 Web 首頁與唯讀 Synology Photos API 探測；`synology-api` Python 套件已安裝在映像中，供後續 API 整合驗證。首頁會列出 DSM 回報的 `SYNO.Foto.*` 與 `SYNO.FotoTeam.*` 模組。這一版尚未登入 NAS、讀取照片或執行 AI 標記。
+目前容器提供繁體中文 Web 首頁、唯讀 Photos API 探測與照片清單瀏覽。使用者可在 UI 輸入 NAS 帳密（支援選填 OTP），登入後切換個人空間／共享空間，以分頁方式查看照片 ID、檔名、拍攝時間、地點及既有標籤；可選擇只顯示目前頁面中地點為日本的項目。NAS Session ID 保存在服務程序記憶體中，瀏覽器只持有簽章後的隨機工作階段識別碼；服務重新啟動後需重新登入。照片 API 使用原生 HTTP 呼叫，`synology-api` 套件仍安裝於映像供後續整合評估。
 
-1. 複製 `.env.example` 為 `.env`，填入 NAS 的 DSM 根網址與照片目錄路徑。`SYNOLOGY_URL` 必須使用可由 NAS 容器連線、且 TLS 憑證可驗證的網址。
+此階段不下載縮圖或原圖、不讀取掛載目錄中的檔案、不修改標籤，也不執行 AI 標記。Photos API 的 item ID、folder ID 與 `/Photos` 下原檔路徑尚未建立對照；日本篩選目前只比對已載入的單一頁面，不能代表完整相片庫的搜尋結果。
+
+1. 複製 `.env.example` 為 `.env`，填入 NAS 的 DSM 根網址與照片目錄路徑。`SYNOLOGY_URL` 必須使用可由 NAS 容器連線、且 TLS 憑證可驗證的網址。此 NAS 可使用 `https://wenchiehlee.synology.me:7778`。
 2. 執行 `docker compose up -d --build`。
 3. 瀏覽 `http://NAS_IP:5056`；可用 `WEB_PORT` 調整對外埠號。
+4. 按「探索 Photos API」確認模組後，在登入區輸入有 Synology Photos 權限的 NAS 帳號與密碼；有啟用雙重驗證時輸入當次 OTP。然後選擇空間並載入照片清單。
+
+直接使用 HTTP 埠時，登入密碼會在瀏覽器與 Web UI 之間傳送；只應在可信任的 LAN 或 SSH tunnel 中使用。需要跨不可信網路存取時，應先透過 DSM 反向代理或其他 TLS 終端提供 HTTPS，再登入。NAS API 端連線會驗證 TLS 憑證，不支援關閉驗證。
 
 Compose 預設將個人空間 `/volume1/homes/wjlee/Photos` 唯讀掛載至容器的 `/Photos`。如 NAS 帳號或路徑不同，請調整 `PHOTO_LIBRARY_PATH`。`publish-image.yml` 可由 GitHub Actions 手動觸發，將多架構映像發佈至 `wenchiehlee1020/synology-photo-tagger`；需要設定 `DOCKERHUB_USERNAME` 與 `DOCKERHUB_TOKEN` repository secrets。
 
