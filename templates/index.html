@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f4f6f2">
+  <title>Synology Photo Tagger</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="/" aria-label="Synology Photo Tagger 首頁">
+        <span class="brand-mark"><span></span><span></span><span></span><span></span></span>
+        <span class="brand-copy"><strong>Photo Tagger</strong><small>PERSONAL PHOTO WORKSPACE</small></span>
+      </a>
+
+      <div class="nav-label">工作區</div>
+      <nav class="main-nav" aria-label="主要導覽">
+        <a class="nav-item active" href="#overview"><span class="nav-icon">◫</span>總覽</a>
+        <a class="nav-item" href="#connection"><span class="nav-icon">⌁</span>照片來源</a>
+        <a class="nav-item disabled" href="#jobs" aria-disabled="true"><span class="nav-icon">✳</span>AI 標記工作 <em>即將推出</em></a>
+        <a class="nav-item disabled" href="#review" aria-disabled="true"><span class="nav-icon">☷</span>人工複核 <em>即將推出</em></a>
+      </nav>
+
+      <div class="sidebar-bottom">
+        <div class="privacy-note"><span class="privacy-icon">◈</span><div><strong>照片留在你的 NAS</strong><small>此服務不會上傳影像</small></div></div>
+        <div class="version-label">API 探索模式 <span class="live-dot"></span></div>
+      </div>
+    </aside>
+
+    <main class="main-content" id="overview">
+      <header class="topbar">
+        <div class="breadcrumb">工作區 <span>/</span> <strong>總覽</strong></div>
+        <div class="topbar-right"><span class="local-badge"><span class="live-dot"></span>本機服務</span><span class="avatar">PT</span></div>
+      </header>
+
+      <section class="welcome-row">
+        <div>
+          <p class="eyebrow">YOUR LIBRARY, BETTER ORGANIZED</p>
+          <h1>讓每張照片，<span>更容易被找到。</span></h1>
+          <p class="welcome-text">先連接 Synology Photos，確認 API 與照片來源，再開始建立你的第一個 AI 標記工作。</p>
+        </div>
+        <div class="welcome-art" aria-hidden="true"><div class="art-sun"></div><div class="art-hill hill-back"></div><div class="art-hill hill-front"></div><div class="art-frame"><span>✦</span></div></div>
+      </section>
+
+      <section class="summary-grid" aria-label="服務狀態">
+        <article class="summary-card"><div class="summary-top"><span class="summary-icon purple">⌘</span><span class="status-pill ready"><i></i>運作中</span></div><div class="summary-title">Web 工作區</div><div class="summary-detail">Python 服務已啟動</div></article>
+        <article class="summary-card"><div class="summary-top"><span class="summary-icon blue">⌁</span><span class="status-pill {% if base_url %}configured{% else %}waiting{% endif %}"><i></i>{% if base_url %}已設定{% else %}待設定{% endif %}</span></div><div class="summary-title">Synology Photos API</div><div class="summary-detail">{% if base_url %}{{ base_url }}{% else %}設定 NAS 網址以開始探索{% endif %}</div></article>
+        <article class="summary-card"><div class="summary-top"><span class="summary-icon green">▧</span><span class="status-pill {% if library_mounted %}configured{% else %}waiting{% endif %}"><i></i>{% if library_mounted %}已掛載{% else %}待掛載{% endif %}</span></div><div class="summary-title">原始照片資料夾</div><div class="summary-detail">唯讀存取，保護原始檔案</div></article>
+      </section>
+
+      <section class="content-grid" id="connection">
+        <article class="panel connection-panel">
+          <div class="panel-heading"><div><p class="eyebrow">STEP 01 · CONNECTION</p><h2>連接你的照片庫</h2></div><span class="heading-icon">⌁</span></div>
+          <p class="panel-copy">先確認 NAS 可回應 Photos API。這項探測只讀取 API 清單，不需要輸入帳號或密碼。</p>
+          <div class="connection-details">
+            <div class="detail-row"><span>DSM 位址</span><strong class="mono">{% if base_url %}{{ base_url }}{% else %}尚未設定{% endif %}</strong></div>
+            <div class="detail-row"><span>照片 API SDK</span><strong><span class="sdk-mark">Py</span> synology-api <span class="version-chip">{{ sdk_version }}</span></strong></div>
+            <div class="detail-row"><span>驗證方式</span><strong>唯讀 API 探測</strong></div>
+          </div>
+          <div class="panel-actions"><button class="primary-button" id="discover-button" {% if not base_url %}disabled{% endif %}><span class="button-spark">✦</span>探索 Photos API<span class="button-arrow">→</span></button><span class="action-caption">約需數秒</span></div>
+          {% if not base_url %}<div class="inline-hint"><span>ⓘ</span><div><strong>尚未設定 NAS 網址</strong><br>請在 Compose 設定 <code>SYNOLOGY_URL</code>，例如 <code>https://NAS 主機:埠號</code>。</div></div>{% endif %}
+          <div class="result-box" id="result-box" hidden aria-live="polite"></div>
+        </article>
+
+        <aside class="side-panels">
+          <article class="mini-panel next-panel"><div class="mini-icon">✳</div><div class="mini-kicker">NEXT UP</div><h3>建立你的第一個<br>AI 標記工作</h3><p>從 Synology 相簿挑選照片，再讓本機模型辨識內容。</p><span class="coming-label">連線確認後即可開始</span></article>
+          <article class="mini-panel privacy-panel"><div class="privacy-heading"><span>◈</span><strong>隱私優先設計</strong></div><p>照片透過 NAS API 選取。原始檔以唯讀方式掛載，讓 AI 能在本機分析。</p><div class="privacy-foot"><span></span>你的資料由你掌握</div></article>
+        </aside>
+      </section>
+
+      <section class="module-panel" id="modules" hidden>
+        <div class="module-heading"><div><p class="eyebrow">API DISCOVERY</p><h2>找到的 Photos API 模組</h2></div><span class="module-count" id="module-count"></span></div>
+        <p class="module-intro">這是 NAS 回報的模組清單。不同 DSM 與 Photos 版本提供的 API 可能不同。</p>
+        <div class="module-groups"><div><h3><span class="group-dot personal"></span>個人空間 <span id="personal-count"></span></h3><ul id="personal-modules"></ul></div><div><h3><span class="group-dot shared"></span>共享空間 <span id="shared-count"></span></h3><ul id="shared-modules"></ul></div></div>
+      </section>
+
+      <footer class="footer"><span>Synology Photo Tagger <span class="footer-sep">·</span> API exploration build</span><span>照片與標籤由你掌控 <span class="footer-heart">✦</span></span></footer>
+    </main>
+  </div>
+
+  <script>
+    const button = document.getElementById('discover-button');
+    const resultBox = document.getElementById('result-box');
+    const modulePanel = document.getElementById('modules');
+
+    function showResult(message, kind) {
+      resultBox.hidden = false;
+      resultBox.className = `result-box ${kind}`;
+      resultBox.textContent = message;
+    }
+
+    function fillList(id, values) {
+      const list = document.getElementById(id);
+      list.replaceChildren();
+      if (!values.length) {
+        const item = document.createElement('li');
+        item.className = 'empty-module';
+        item.textContent = '此空間未回報模組';
+        list.append(item);
+        return;
+      }
+      for (const value of values) {
+        const item = document.createElement('li');
+        item.textContent = value;
+        list.append(item);
+      }
+    }
+
+    button?.addEventListener('click', async () => {
+      button.disabled = true;
+      button.classList.add('loading');
+      button.innerHTML = '<span class="spinner"></span>正在連接 NAS…';
+      resultBox.hidden = true;
+      modulePanel.hidden = true;
+      try {
+        const response = await fetch('/api/discover', { method: 'POST' });
+        const data = await response.json();
+        if (!data.ok) {
+          const detail = (data.details || []).join(' ');
+          showResult(`${data.error} ${detail}`, 'error');
+          return;
+        }
+        showResult(`連線成功！透過 ${data.endpoint} 找到 ${data.total_modules} 個 API 模組。`, 'success');
+        document.getElementById('module-count').textContent = `${data.total_modules} 個模組`;
+        document.getElementById('personal-count').textContent = `(${data.photo_modules.length})`;
+        document.getElementById('shared-count').textContent = `(${data.team_modules.length})`;
+        fillList('personal-modules', data.photo_modules);
+        fillList('shared-modules', data.team_modules);
+        modulePanel.hidden = false;
+      } catch (error) {
+        showResult('無法完成連線探測。請確認服務狀態與 NAS 網路設定後重試。', 'error');
+      } finally {
+        button.disabled = false;
+        button.classList.remove('loading');
+        button.innerHTML = '<span class="button-spark">✦</span>重新探索 Photos API<span class="button-arrow">→</span>';
+      }
+    });
+  </script>
+</body>
+</html>
