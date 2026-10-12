@@ -9,6 +9,8 @@ services:
       SYNOLOGY_URL: ${SYNOLOGY_URL:-}
       PHOTO_LIBRARY_PATH: /Photos
       DEBUG_SHELL: ${DEBUG_SHELL:-false}
+    extra_hosts:
+      - "wenchiehlee.synology.me:192.168.31.101"
     ports:
       - "${WEB_PORT:-5056}:5000"
       - "127.0.0.1:${DEBUG_SSH_PORT:-2223}:22"
