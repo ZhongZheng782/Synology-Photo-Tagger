@@ -29,6 +29,7 @@ API_INFO_PARAMS = {
 API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 MAX_PAGE_SIZE = 100
+APP_VERSION = os.environ.get("APP_VERSION", "v0.1")
 
 
 @dataclass
@@ -257,6 +258,7 @@ def index():
         "index.html",
         base_url=configured_base_url(),
         sdk_version=sdk_version(),
+        app_version=APP_VERSION,
         library_mounted=os.path.isdir("/Photos"),
         logged_in=current_nas_session() is not None,
     )
@@ -271,7 +273,7 @@ def prevent_private_response_caching(response):
 
 @app.get("/health")
 def health():
-    return jsonify({"status": "ok", "service": "synology-photo-tagger"})
+    return jsonify({"status": "ok", "service": "synology-photo-tagger", "version": APP_VERSION})
 
 
 @app.post("/api/discover")

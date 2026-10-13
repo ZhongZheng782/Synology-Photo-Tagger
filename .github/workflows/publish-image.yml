@@ -33,4 +33,14 @@ jobs:
           push: true
           tags: |
             wenchiehlee1020/synology-photo-tagger:latest
+            wenchiehlee1020/synology-photo-tagger:v0.1
             wenchiehlee1020/synology-photo-tagger:sha-${{ github.sha }}
+
+      - name: Update Docker Hub repository overview
+        uses: peter-evans/dockerhub-description@v5
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: wenchiehlee1020/synology-photo-tagger
+          short-description: Read-only Synology Photos browser and metadata viewer (v0.1).
+          readme-filepath: ./DOCKERHUB.md

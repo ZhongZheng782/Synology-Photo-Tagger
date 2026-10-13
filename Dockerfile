@@ -1,5 +1,10 @@
 FROM python:3.11-slim
 
+ARG APP_VERSION=v0.1
+LABEL org.opencontainers.image.title="Synology Photo Tagger" \
+      org.opencontainers.image.version="${APP_VERSION}" \
+      org.opencontainers.image.description="Read-only Synology Photos browser with thumbnail previews and on-demand photo metadata."
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends bash openssh-server \
     && rm -rf /var/lib/apt/lists/*
@@ -7,7 +12,8 @@ RUN apt-get update \
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PORT=5000
+    PORT=5000 \
+    APP_VERSION=${APP_VERSION}
 
 WORKDIR /app
 

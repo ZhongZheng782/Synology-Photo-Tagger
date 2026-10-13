@@ -272,6 +272,8 @@
 
 ## Docker 開發版
 
+目前發佈版本為 **v0.1**。Docker Hub 提供 `v0.1` 固定版本標籤與 `latest` 標籤；NAS Compose 預設固定使用 `v0.1`。Docker Hub Repository overview 的同步稿位於 [`DOCKERHUB.md`](DOCKERHUB.md)。
+
 目前容器提供繁體中文 Web 首頁、唯讀 Photos API 探測與照片清單瀏覽。使用者可在 UI 輸入 NAS 帳密（支援選填 OTP），登入後切換個人空間／共享空間，以分頁方式查看照片 ID、檔名、拍攝時間、地點及既有標籤；清單會透過本站的縮圖代理顯示 Synology Photos 中尺寸為 M 或 SM 的預覽。展開照片卡片的 metadata 區塊時，服務會按需向 Photos API 取得描述、EXIF、解析度、GPS 與既有標籤。選擇日本時，服務會逐頁掃描所選空間，按需累積符合地點的照片並提供分頁；首頁會顯示目前掃描進度。搜尋結果快取在服務程序記憶體中，登出或服務重新啟動後會清除。NAS Session ID 保存在服務程序記憶體中，瀏覽器只持有簽章後的隨機工作階段識別碼；服務重新啟動後需重新登入。照片 API 使用原生 HTTP 呼叫，`synology-api` 套件仍安裝於映像供後續整合評估。
 
 此階段只透過 Photos API 取得縮圖，不下載原圖、不讀取掛載目錄中的檔案、不修改標籤，也不執行 AI 標記。縮圖透過需要登入的本站端點代理，NAS Session ID 不會放進瀏覽器的縮圖 URL。Photos API 的 item ID、folder ID 與 `/Photos` 下原檔路徑尚未建立對照。日本篩選會依 `additional.address.country` 的回傳值比對；沒有國家地點資料的照片不會列入結果。
