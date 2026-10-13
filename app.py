@@ -49,10 +49,20 @@ class JapanSearch:
     last_used: float = 0.0
 
 
+@dataclass
+class PhotoLibraryIndex:
+    photos: list[dict]
+    source_offset: int = 0
+    complete: bool = False
+    last_used: float = 0.0
+
+
 _nas_sessions: dict[str, NasSession] = {}
 _nas_sessions_lock = threading.Lock()
 _japan_searches: dict[tuple[str, str], JapanSearch] = {}
 _japan_searches_lock = threading.Lock()
+_photo_library_indexes: dict[tuple[str, str], PhotoLibraryIndex] = {}
+_photo_library_indexes_lock = threading.Lock()
 
 
 class SynologyApiError(Exception):
@@ -228,6 +238,60 @@ def is_japan(photo: dict) -> bool:
     return country == "jp" or "japan" in country or "日本" in country
 
 
+def photo_library_index(token: str, space: str) -> PhotoLibraryIndex:
+    cache_key = (token, space)
+    now = time.monotonic()
+    with _photo_library_indexes_lock:
+        expired = [
+            key for key, value in _photo_library_indexes.items()
+            if now - value.last_used > SESSION_TTL_SECONDS
+        ]
+        for key in expired:
+            _photo_library_indexes.pop(key, None)
+        index = _photo_library_indexes.get(cache_key)
+        if index is None:
+            index = PhotoLibraryIndex(photos=[], last_used=now)
+            _photo_library_indexes[cache_key] = index
+        index.last_used = now
+        return index
+
+
+def scan_photo_library_page(
+    nas: NasSession, api_name: str, url: str, version: int, index: PhotoLibraryIndex
+) -> None:
+    # Keep only one NAS page in flight for an index, even if the browser polls quickly.
+    with _photo_library_indexes_lock:
+        if index.complete:
+            return
+        payload = post_synology(
+            nas.client,
+            url,
+            {
+                "api": api_name,
+                "version": version,
+                "method": "list",
+                "offset": index.source_offset,
+                "limit": MAX_PAGE_SIZE,
+                "type": "photo",
+                "sort_by": "takentime",
+                "sort_direction": "desc",
+                "additional": json.dumps(
+                    ["thumbnail", "resolution", "gps", "address", "tag"],
+                    separators=(",", ":"),
+                ),
+                "_sid": nas.sid,
+            },
+        )
+        data = payload.get("data")
+        items = data.get("list") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            raise SynologyApiError("照片 API 回應中沒有清單資料。")
+        index.photos.extend(item_summary(item) for item in items if isinstance(item, dict))
+        index.source_offset += len(items)
+        index.complete = len(items) < MAX_PAGE_SIZE
+        index.last_used = time.monotonic()
+
+
 def configured_base_url() -> str:
     return os.environ.get("SYNOLOGY_URL", "").strip().rstrip("/")
 
@@ -389,6 +453,9 @@ def login():
             with _japan_searches_lock:
                 _japan_searches.pop((old_token, "personal"), None)
                 _japan_searches.pop((old_token, "shared"), None)
+            with _photo_library_indexes_lock:
+                _photo_library_indexes.pop((old_token, "personal"), None)
+                _photo_library_indexes.pop((old_token, "shared"), None)
             with _nas_sessions_lock:
                 previous = _nas_sessions.pop(old_token, None)
             if previous:
@@ -418,6 +485,9 @@ def logout():
         with _japan_searches_lock:
             _japan_searches.pop((token, "personal"), None)
             _japan_searches.pop((token, "shared"), None)
+        with _photo_library_indexes_lock:
+            _photo_library_indexes.pop((token, "personal"), None)
+            _photo_library_indexes.pop((token, "shared"), None)
         with _nas_sessions_lock:
             nas = _nas_sessions.pop(token, None)
         if nas:
@@ -460,6 +530,47 @@ def list_photos():
     try:
         url, version = api_endpoint(nas, api_name)
         country_filter = request.args.get("country", "").strip().lower()
+        tag_filter = request.args.get("tag", "").strip()
+        if tag_filter:
+            token = session.get("nas_session_token")
+            if not token:
+                return jsonify({"ok": False, "error": "登入工作階段已失效，請重新登入。"}), 401
+            index = photo_library_index(token, space)
+
+            def matches_filter(photo: dict) -> bool:
+                if country_filter == "japan" and not is_japan(photo):
+                    return False
+                photo_tags = photo.get("tags", [])
+                if tag_filter == "__untagged__":
+                    return not photo_tags
+                return any(
+                    str(name) == tag_filter
+                    for name in photo_tags
+                )
+
+            matches = [photo for photo in index.photos if matches_filter(photo)]
+            if len(matches) < offset + limit and not index.complete:
+                scan_photo_library_page(nas, api_name, url, version, index)
+                matches = [photo for photo in index.photos if matches_filter(photo)]
+            photos = matches[offset:offset + limit]
+            scanning = not index.complete and len(matches) < offset + limit
+            return jsonify(
+                {
+                    "ok": True,
+                    "space": space,
+                    "offset": offset,
+                    "limit": limit,
+                    "next_offset": offset + len(photos),
+                    "has_more": len(matches) > offset + limit or not index.complete,
+                    "page_count": len(photos),
+                    "photos": photos,
+                    "scanning": scanning,
+                    "search_complete": index.complete,
+                    "scanned_count": index.source_offset,
+                    "total_found": len(matches),
+                    "tag_filter": tag_filter,
+                }
+            )
         if country_filter == "japan":
             token = session.get("nas_session_token")
             if not token:
@@ -567,6 +678,46 @@ def list_photos():
                 "has_more": len(items) == limit,
                 "page_count": len(photos),
                 "photos": photos,
+            }
+        )
+    except SynologyApiError as exc:
+        status = 502 if exc.error_code is None else 403
+        return jsonify({"ok": False, "error": str(exc), "error_code": exc.error_code}), status
+
+
+@app.get("/api/photos/tags")
+def list_photo_tags():
+    nas = current_nas_session()
+    if not nas:
+        return jsonify({"ok": False, "error": "請先登入 Synology Photos。"}), 401
+    space = request.args.get("space", "personal")
+    if space not in {"personal", "shared"}:
+        return jsonify({"ok": False, "error": "空間類型無效。"}), 400
+    token = session.get("nas_session_token")
+    if not token:
+        return jsonify({"ok": False, "error": "登入工作階段已失效，請重新登入。"}), 401
+    api_name = "SYNO.Foto.Browse.Item" if space == "personal" else "SYNO.FotoTeam.Browse.Item"
+    try:
+        url, version = api_endpoint(nas, api_name)
+        index = photo_library_index(token, space)
+        scan_photo_library_page(nas, api_name, url, version, index)
+        tags = sorted(
+            {
+                str(tag).strip()
+                for photo in index.photos
+                for tag in photo.get("tags", [])
+                if str(tag).strip()
+            },
+            key=str.casefold,
+        )
+        return jsonify(
+            {
+                "ok": True,
+                "space": space,
+                "tags": tags,
+                "scanning": not index.complete,
+                "scanned_count": index.source_offset,
+                "complete": index.complete,
             }
         )
     except SynologyApiError as exc:
