@@ -104,6 +104,8 @@
         <div class="photo-controls">
           <label>空間<select id="space-select"><option value="personal">個人空間</option><option value="shared">共享空間</option></select></label>
           <label>地點<select id="country-select"><option value="">全部地點</option><option value="japan">日本</option></select></label>
+          <label>標籤<select id="tag-select" disabled><option value="">請先載入標籤</option></select></label>
+          <button class="secondary-button" id="load-tags" type="button">載入標籤</button>
           <label>每頁<select id="limit-select"><option>24</option><option selected>48</option><option>100</option></select></label>
           <button class="primary-button" id="load-photos" type="button">載入照片 <span class="button-arrow">→</span></button>
         </div>
@@ -126,6 +128,8 @@
     let photoOffset = 0;
     let photoHasMore = false;
     let photoRequestId = 0;
+    let photoTagsSpace = null;
+    let photoTagsRequestId = 0;
 
     function showResult(message, kind) {
       resultBox.hidden = false;
@@ -156,23 +160,80 @@
       authResult.textContent = message;
     }
 
+    function renderPhotoTagOptions(select, tags, selectedValue = '') {
+      select.replaceChildren();
+      select.append(new Option('全部標籤', ''));
+      select.append(new Option('未加標籤', '__untagged__'));
+      for (const tag of tags) select.append(new Option(tag, tag));
+      select.value = [...select.options].some(option => option.value === selectedValue) ? selectedValue : '';
+    }
+
+    function resetPhotoTags() {
+      photoTagsRequestId += 1;
+      photoTagsSpace = null;
+      const select = document.getElementById('tag-select');
+      select.replaceChildren(new Option('請先載入標籤', ''));
+      select.disabled = true;
+      const button = document.getElementById('load-tags');
+      button.disabled = false;
+      button.textContent = '載入標籤';
+    }
+
+    async function loadPhotoTags() {
+      const requestId = ++photoTagsRequestId;
+      const space = document.getElementById('space-select').value;
+      const select = document.getElementById('tag-select');
+      const button = document.getElementById('load-tags');
+      if (photoTagsSpace === space && !select.disabled) return;
+      const selectedValue = select.value;
+      const tags = new Set();
+      select.disabled = true;
+      button.disabled = true;
+      try {
+        let complete = false;
+        while (!complete) {
+          const params = new URLSearchParams({ space });
+          const response = await fetch(`/api/photos/tags?${params}`);
+          const data = await response.json();
+          if (requestId !== photoTagsRequestId || space !== document.getElementById('space-select').value) return;
+          if (!data.ok) throw new Error(data.error || '標籤讀取失敗。');
+          for (const tag of data.tags || []) tags.add(tag);
+          renderPhotoTagOptions(select, [...tags].sort((a, b) => a.localeCompare(b, 'zh-Hant')), selectedValue);
+          complete = data.complete;
+          button.textContent = complete ? `標籤 ${tags.size} 個` : `讀取中 ${data.scanned_count} 張`;
+          if (!complete) await new Promise(resolve => window.setTimeout(resolve, 120));
+        }
+        photoTagsSpace = space;
+        select.disabled = false;
+        select.value = selectedValue;
+      } catch (error) {
+        button.textContent = error.message || '載入標籤失敗';
+        select.disabled = false;
+      } finally {
+        if (requestId === photoTagsRequestId) button.disabled = false;
+      }
+    }
+
     async function loadPhotos(offset = 0) {
       const requestId = ++photoRequestId;
       const selectedSpace = document.getElementById('space-select').value;
       const selectedCountry = document.getElementById('country-select').value;
+      const selectedTag = document.getElementById('tag-select').value;
       const list = document.getElementById('photo-list');
       const loadButton = document.getElementById('load-photos');
       const limit = Number(document.getElementById('limit-select').value);
       const params = new URLSearchParams({
         space: selectedSpace,
         country: selectedCountry,
+        tag: selectedTag,
         offset: String(offset),
         limit: String(limit)
       });
       loadButton.disabled = true;
       loadButton.innerHTML = '<span class="spinner"></span>正在讀取…';
-      if (!(selectedCountry === 'japan' && list.querySelector('.photo-card'))) {
-        list.replaceChildren(Object.assign(document.createElement('div'), { className: 'photo-empty', textContent: selectedCountry === 'japan' ? '正在搜尋相片庫…' : '正在從 NAS 讀取照片清單…' }));
+      const filtered = selectedCountry === 'japan' || Boolean(selectedTag);
+      if (!(filtered && list.querySelector('.photo-card'))) {
+        list.replaceChildren(Object.assign(document.createElement('div'), { className: 'photo-empty', textContent: filtered ? '正在搜尋相片庫…' : '正在從 NAS 讀取照片清單…' }));
       }
       try {
         const response = await fetch(`/api/photos?${params}`);
@@ -189,15 +250,16 @@
         }
         photoOffset = data.offset;
         photoHasMore = data.has_more;
-        document.getElementById('photo-count').textContent = selectedCountry === 'japan'
+        document.getElementById('photo-count').textContent = filtered
           ? (data.search_complete ? `${data.total_found} 張符合` : `已找到 ${data.total_found} 張 · 已掃描 ${data.scanned_count} 張`)
           : `${data.page_count} 張照片`;
-        document.getElementById('page-label').textContent = `第 ${Math.floor(data.offset / data.limit) + 1} 頁 · ${data.space === 'personal' ? '個人空間' : '共享空間'}${selectedCountry ? ' · 日本篩選' : ''}`;
+        const activeFilters = [selectedCountry === 'japan' ? '日本' : '', selectedTag === '__untagged__' ? '未加標籤' : selectedTag].filter(Boolean).join('、');
+        document.getElementById('page-label').textContent = `第 ${Math.floor(data.offset / data.limit) + 1} 頁 · ${data.space === 'personal' ? '個人空間' : '共享空間'}${activeFilters ? ` · ${activeFilters}篩選` : ''}`;
         document.getElementById('prev-page').disabled = data.offset === 0;
         document.getElementById('next-page').disabled = !data.has_more;
         list.replaceChildren();
         if (!data.photos.length) {
-          list.append(Object.assign(document.createElement('div'), { className: 'photo-empty', textContent: data.scanning ? `正在搜尋相片庫…已掃描 ${data.scanned_count} 張照片。` : (selectedCountry === 'japan' ? '這個空間沒有找到地點為日本的照片。' : '這一頁沒有照片。') }));
+          list.append(Object.assign(document.createElement('div'), { className: 'photo-empty', textContent: data.scanning ? `正在搜尋相片庫…已掃描 ${data.scanned_count} 張照片。` : (filtered ? '這個空間沒有符合目前篩選條件的照片。' : '這一頁沒有照片。') }));
         }
         for (const photo of data.photos) {
           const card = document.createElement('article');
@@ -307,7 +369,7 @@
         }
         if (data.scanning) {
           window.setTimeout(() => {
-            if (requestId === photoRequestId && selectedSpace === document.getElementById('space-select').value && selectedCountry === document.getElementById('country-select').value) loadPhotos(offset);
+            if (requestId === photoRequestId && selectedSpace === document.getElementById('space-select').value && selectedCountry === document.getElementById('country-select').value && selectedTag === document.getElementById('tag-select').value) loadPhotos(offset);
           }, 200);
         }
       } catch (error) {
@@ -375,6 +437,7 @@
         loginForm.hidden = true;
         loggedInRow.hidden = false;
         photoBrowser.hidden = false;
+        resetPhotoTags();
         await loadPhotos(0);
       } catch (error) {
         showAuthResult('無法完成登入，請確認服務與 NAS 連線。', 'error');
@@ -391,10 +454,26 @@
       loggedInRow.hidden = true;
       loginForm.hidden = false;
       photoBrowser.hidden = true;
+      resetPhotoTags();
       showAuthResult('已登出 Synology Photos。', 'success');
     });
 
     document.getElementById('load-photos')?.addEventListener('click', () => loadPhotos(0));
+    document.getElementById('load-tags')?.addEventListener('click', loadPhotoTags);
+    document.getElementById('tag-select')?.addEventListener('change', () => {
+      if (!loginForm.hidden) return;
+      loadPhotos(0);
+    });
+    document.getElementById('space-select')?.addEventListener('change', () => {
+      resetPhotoTags();
+      if (!loginForm.hidden) loadPhotos(0);
+    });
+    for (const id of ['country-select', 'limit-select']) {
+      document.getElementById(id)?.addEventListener('change', () => {
+        if (!loginForm.hidden) return;
+        loadPhotos(0);
+      });
+    }
     document.getElementById('prev-page')?.addEventListener('click', () => {
       const limit = Number(document.getElementById('limit-select').value);
       loadPhotos(Math.max(0, photoOffset - limit));
@@ -402,13 +481,6 @@
     document.getElementById('next-page')?.addEventListener('click', () => {
       loadPhotos(photoOffset + Number(document.getElementById('limit-select').value));
     });
-    for (const id of ['space-select', 'country-select', 'limit-select']) {
-      document.getElementById(id)?.addEventListener('change', () => {
-        if (!loginForm.hidden) return;
-        loadPhotos(0);
-      });
-    }
-
     if (!loginForm.hidden) photoBrowser.hidden = true;
   </script>
 </body>

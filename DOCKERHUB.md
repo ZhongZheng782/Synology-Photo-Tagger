@@ -8,6 +8,7 @@ A lightweight Python web app for browsing a Synology Photos library and inspecti
 - Browses personal and shared spaces with paginated photo previews.
 - Shows thumbnails through an authenticated proxy.
 - Loads description, EXIF, resolution, GPS, location, and existing tags when a photo's metadata panel is opened.
+- Filters photo candidates by existing tag, including photos without tags, and can combine tag and Japan location filters. Tag options are gathered with a read-only scan of the selected space and show scan progress.
 - Supports Japan location filtering and optional OTP login.
 - Keeps the NAS session on the server and serves the original photo folder as a read-only mount.
 
