@@ -96,7 +96,7 @@
           <div class="security-hint"><strong>連線提醒</strong><span>瀏覽器到此 Web UI 使用 HTTP。請只在可信任的區域網路或 SSH tunnel 中輸入 NAS 密碼；瀏覽器到 NAS API 的連線使用已驗證的 HTTPS。</span></div>
           <div class="result-box" id="auth-result" hidden aria-live="polite"></div>
         </article>
-        <aside class="mini-panel privacy-panel browse-note"><div class="privacy-heading"><span>◈</span><strong>唯讀照片瀏覽</strong></div><p>目前不會修改標籤、相片檔案或 Synology Photos 資料庫。地點篩選只會比對目前載入的這一頁。</p><div class="privacy-foot"><span></span>每頁最多 100 張</div></aside>
+        <aside class="mini-panel privacy-panel browse-note"><div class="privacy-heading"><span>◈</span><strong>唯讀照片瀏覽</strong></div><p>目前不會修改標籤、相片檔案或 Synology Photos 資料庫。選擇日本時會逐頁搜尋所選空間的相片庫。</p><div class="privacy-foot"><span></span>每頁最多 100 張</div></aside>
       </section>
 
       <section class="module-panel photo-panel" id="photo-browser" {% if not logged_in %}hidden{% endif %}>
@@ -125,6 +125,7 @@
     const photoBrowser = document.getElementById('photo-browser');
     let photoOffset = 0;
     let photoHasMore = false;
+    let photoRequestId = 0;
 
     function showResult(message, kind) {
       resultBox.hidden = false;
@@ -156,21 +157,27 @@
     }
 
     async function loadPhotos(offset = 0) {
+      const requestId = ++photoRequestId;
+      const selectedSpace = document.getElementById('space-select').value;
+      const selectedCountry = document.getElementById('country-select').value;
       const list = document.getElementById('photo-list');
       const loadButton = document.getElementById('load-photos');
       const limit = Number(document.getElementById('limit-select').value);
       const params = new URLSearchParams({
-        space: document.getElementById('space-select').value,
-        country: document.getElementById('country-select').value,
+        space: selectedSpace,
+        country: selectedCountry,
         offset: String(offset),
         limit: String(limit)
       });
       loadButton.disabled = true;
       loadButton.innerHTML = '<span class="spinner"></span>正在讀取…';
-      list.replaceChildren(Object.assign(document.createElement('div'), { className: 'photo-empty', textContent: '正在從 NAS 讀取照片清單…' }));
+      if (!(selectedCountry === 'japan' && list.querySelector('.photo-card'))) {
+        list.replaceChildren(Object.assign(document.createElement('div'), { className: 'photo-empty', textContent: selectedCountry === 'japan' ? '正在搜尋相片庫…' : '正在從 NAS 讀取照片清單…' }));
+      }
       try {
         const response = await fetch(`/api/photos?${params}`);
         const data = await response.json();
+        if (requestId !== photoRequestId) return;
         if (!data.ok) {
           list.replaceChildren(Object.assign(document.createElement('div'), { className: 'photo-empty error-text', textContent: data.error || '讀取照片清單失敗。' }));
           if (response.status === 401) {
@@ -182,14 +189,15 @@
         }
         photoOffset = data.offset;
         photoHasMore = data.has_more;
-        document.getElementById('photo-count').textContent = `${data.page_count} 張照片`;
-        document.getElementById('page-label').textContent = `第 ${Math.floor(data.offset / data.limit) + 1} 頁 · ${data.space === 'personal' ? '個人空間' : '共享空間'}${document.getElementById('country-select').value ? ' · 日本篩選' : ''}`;
+        document.getElementById('photo-count').textContent = selectedCountry === 'japan'
+          ? (data.search_complete ? `${data.total_found} 張符合` : `已找到 ${data.total_found} 張 · 已掃描 ${data.scanned_count} 張`)
+          : `${data.page_count} 張照片`;
+        document.getElementById('page-label').textContent = `第 ${Math.floor(data.offset / data.limit) + 1} 頁 · ${data.space === 'personal' ? '個人空間' : '共享空間'}${selectedCountry ? ' · 日本篩選' : ''}`;
         document.getElementById('prev-page').disabled = data.offset === 0;
         document.getElementById('next-page').disabled = !data.has_more;
         list.replaceChildren();
         if (!data.photos.length) {
-          list.append(Object.assign(document.createElement('div'), { className: 'photo-empty', textContent: '這一頁沒有符合條件的照片。可換空間、地點或前後頁再查看。' }));
-          return;
+          list.append(Object.assign(document.createElement('div'), { className: 'photo-empty', textContent: data.scanning ? `正在搜尋相片庫…已掃描 ${data.scanned_count} 張照片。` : (selectedCountry === 'japan' ? '這個空間沒有找到地點為日本的照片。' : '這一頁沒有照片。') }));
         }
         for (const photo of data.photos) {
           const card = document.createElement('article');
@@ -235,6 +243,11 @@
           id.textContent = `ID ${photo.id ?? '—'}`;
           card.append(preview, body, id);
           list.append(card);
+        }
+        if (data.scanning) {
+          window.setTimeout(() => {
+            if (requestId === photoRequestId && selectedSpace === document.getElementById('space-select').value && selectedCountry === document.getElementById('country-select').value) loadPhotos(offset);
+          }, 200);
         }
       } catch (error) {
         list.replaceChildren(Object.assign(document.createElement('div'), { className: 'photo-empty error-text', textContent: '無法讀取照片清單，請確認 NAS 連線後重試。' }));

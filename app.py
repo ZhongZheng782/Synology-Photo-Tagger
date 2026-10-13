@@ -40,8 +40,18 @@ class NasSession:
     last_used: float
 
 
+@dataclass
+class JapanSearch:
+    photos: list[dict]
+    source_offset: int = 0
+    complete: bool = False
+    last_used: float = 0.0
+
+
 _nas_sessions: dict[str, NasSession] = {}
 _nas_sessions_lock = threading.Lock()
+_japan_searches: dict[tuple[str, str], JapanSearch] = {}
+_japan_searches_lock = threading.Lock()
 
 
 class SynologyApiError(Exception):
@@ -183,6 +193,11 @@ def item_summary(item: dict) -> dict:
         "thumbnail_size": "m" if thumbnail.get("m") == "ready" else "sm",
         "tags": [tag.get("name") for tag in tags if isinstance(tag, dict) and tag.get("name")],
     }
+
+
+def is_japan(photo: dict) -> bool:
+    country = str(photo.get("country") or "").strip().casefold()
+    return country == "jp" or "japan" in country or "日本" in country
 
 
 def configured_base_url() -> str:
@@ -342,6 +357,9 @@ def login():
 
         old_token = session.get("nas_session_token")
         if old_token:
+            with _japan_searches_lock:
+                _japan_searches.pop((old_token, "personal"), None)
+                _japan_searches.pop((old_token, "shared"), None)
             with _nas_sessions_lock:
                 previous = _nas_sessions.pop(old_token, None)
             if previous:
@@ -368,6 +386,9 @@ def login():
 def logout():
     token = session.pop("nas_session_token", None)
     if token:
+        with _japan_searches_lock:
+            _japan_searches.pop((token, "personal"), None)
+            _japan_searches.pop((token, "shared"), None)
         with _nas_sessions_lock:
             nas = _nas_sessions.pop(token, None)
         if nas:
@@ -409,6 +430,80 @@ def list_photos():
     api_name = "SYNO.Foto.Browse.Item" if space == "personal" else "SYNO.FotoTeam.Browse.Item"
     try:
         url, version = api_endpoint(nas, api_name)
+        country_filter = request.args.get("country", "").strip().lower()
+        if country_filter == "japan":
+            token = session.get("nas_session_token")
+            if not token:
+                return jsonify({"ok": False, "error": "登入工作階段已失效，請重新登入。"}), 401
+            cache_key = (token, space)
+            with _japan_searches_lock:
+                now = time.monotonic()
+                expired = [
+                    key for key, value in _japan_searches.items()
+                    if now - value.last_used > SESSION_TTL_SECONDS
+                ]
+                for key in expired:
+                    _japan_searches.pop(key, None)
+                search = _japan_searches.get(cache_key)
+                if search is None:
+                    search = JapanSearch(photos=[], last_used=now)
+                    _japan_searches[cache_key] = search
+                search.last_used = now
+
+                # Advance one source page per request so large libraries remain responsive.
+                if not search.complete and len(search.photos) < offset + limit:
+                    batch_size = MAX_PAGE_SIZE
+                    payload = post_synology(
+                        nas.client,
+                        url,
+                        {
+                            "api": api_name,
+                            "version": version,
+                            "method": "list",
+                            "offset": search.source_offset,
+                            "limit": batch_size,
+                            "type": "photo",
+                            "sort_by": "takentime",
+                            "sort_direction": "desc",
+                            "additional": json.dumps(
+                                ["thumbnail", "resolution", "gps", "address", "tag"],
+                                separators=(",", ":"),
+                            ),
+                            "_sid": nas.sid,
+                        },
+                    )
+                    data = payload.get("data")
+                    items = data.get("list") if isinstance(data, dict) else None
+                    if not isinstance(items, list):
+                        raise SynologyApiError("照片 API 回應中沒有清單資料。")
+                    for item in items:
+                        if not isinstance(item, dict):
+                            continue
+                        photo = item_summary(item)
+                        if is_japan(photo):
+                            search.photos.append(photo)
+                    search.source_offset += len(items)
+                    if len(items) < batch_size:
+                        search.complete = True
+                photos = search.photos[offset:offset + limit]
+                scan_needed = len(search.photos) < offset + limit and not search.complete
+                return jsonify(
+                    {
+                        "ok": True,
+                        "space": space,
+                        "offset": offset,
+                        "limit": limit,
+                        "next_offset": offset + len(photos),
+                        "has_more": len(search.photos) > offset + limit or not search.complete,
+                        "page_count": len(photos),
+                        "photos": photos,
+                        "scanning": scan_needed,
+                        "search_complete": search.complete,
+                        "scanned_count": search.source_offset,
+                        "total_found": len(search.photos),
+                    }
+                )
+
         payload = post_synology(
             nas.client,
             url,
@@ -433,14 +528,6 @@ def list_photos():
         if not isinstance(items, list):
             raise SynologyApiError("照片 API 回應中沒有清單資料。")
         photos = [item_summary(item) for item in items if isinstance(item, dict)]
-        country_filter = request.args.get("country", "").strip().lower()
-        if country_filter == "japan":
-            photos = [
-                photo
-                for photo in photos
-                if "japan" in str(photo.get("country") or "").lower()
-                or "日本" in str(photo.get("country") or "")
-            ]
         return jsonify(
             {
                 "ok": True,
