@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 import requests
-from flask import Flask, jsonify, render_template, request, session
+from flask import Flask, Response, jsonify, render_template, request, session
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("APP_SECRET_KEY") or secrets.token_hex(32)
@@ -163,6 +163,7 @@ def item_summary(item: dict) -> dict:
     address = additional.get("address") if isinstance(additional.get("address"), dict) else {}
     gps = additional.get("gps") if isinstance(additional.get("gps"), dict) else {}
     resolution = additional.get("resolution") if isinstance(additional.get("resolution"), dict) else {}
+    thumbnail = additional.get("thumbnail") if isinstance(additional.get("thumbnail"), dict) else {}
     tags = additional.get("tag") if isinstance(additional.get("tag"), list) else []
     return {
         "id": item.get("id"),
@@ -177,6 +178,9 @@ def item_summary(item: dict) -> dict:
         "longitude": gps.get("longitude"),
         "width": resolution.get("width"),
         "height": resolution.get("height"),
+        "thumbnail_cache_key": thumbnail.get("cache_key"),
+        "thumbnail_ready": thumbnail.get("m") == "ready" or thumbnail.get("sm") == "ready",
+        "thumbnail_size": "m" if thumbnail.get("m") == "ready" else "sm",
         "tags": [tag.get("name") for tag in tags if isinstance(tag, dict) and tag.get("name")],
     }
 
@@ -452,3 +456,70 @@ def list_photos():
     except SynologyApiError as exc:
         status = 502 if exc.error_code is None else 403
         return jsonify({"ok": False, "error": str(exc), "error_code": exc.error_code}), status
+
+
+@app.get("/api/photos/<int:photo_id>/thumbnail")
+def photo_thumbnail(photo_id: int):
+    nas = current_nas_session()
+    if not nas:
+        return jsonify({"ok": False, "error": "請先登入 Synology Photos。"}), 401
+    space = request.args.get("space", "personal")
+    cache_key = request.args.get("cache_key", "")
+    size = request.args.get("size", "m")
+    if space not in {"personal", "shared"}:
+        return jsonify({"ok": False, "error": "空間類型無效。"}), 400
+    if not cache_key or len(cache_key) > 80 or not all(
+        part.isdigit() for part in cache_key.split("_", 1)
+    ) or "_" not in cache_key:
+        return jsonify({"ok": False, "error": "縮圖識別碼格式無效。"}), 400
+    if size not in {"m", "sm"}:
+        return jsonify({"ok": False, "error": "縮圖尺寸無效。"}), 400
+
+    api_name = "SYNO.Foto.Thumbnail" if space == "personal" else "SYNO.FotoTeam.Thumbnail"
+    try:
+        url, version = api_endpoint(nas, api_name)
+    except SynologyApiError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 502
+
+    try:
+        response = nas.client.get(
+            url,
+            params={
+                "api": api_name,
+                "version": version,
+                "method": "get",
+                "mode": "download",
+                "id": photo_id,
+                "cache_key": cache_key,
+                "type": "unit",
+                "size": size,
+                "_sid": nas.sid,
+            },
+            timeout=(4, 20),
+        )
+        response.raise_for_status()
+        image = response.content
+    except requests.exceptions.SSLError:
+        return jsonify({"ok": False, "error": "NAS TLS 憑證驗證失敗。"}), 502
+    except requests.exceptions.Timeout:
+        return jsonify({"ok": False, "error": "讀取照片縮圖逾時。"}), 504
+    except requests.exceptions.RequestException:
+        return jsonify({"ok": False, "error": "無法讀取照片縮圖。"}), 502
+
+    signatures = (
+        (b"\xff\xd8\xff", "image/jpeg"),
+        (b"\x89PNG\r\n\x1a\n", "image/png"),
+        (b"GIF87a", "image/gif"),
+        (b"GIF89a", "image/gif"),
+        (b"RIFF", "image/webp"),
+    )
+    content_type = next(
+        (mime for signature, mime in signatures if image.startswith(signature)), None
+    )
+    if content_type == "image/webp" and image[8:12] != b"WEBP":
+        content_type = None
+    if not content_type:
+        return jsonify({"ok": False, "error": "NAS 尚未提供可用的照片縮圖。"}), 404
+    result = Response(image, mimetype=content_type)
+    result.headers["X-Content-Type-Options"] = "nosniff"
+    return result
