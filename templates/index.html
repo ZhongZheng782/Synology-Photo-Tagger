@@ -238,6 +238,67 @@
             tags.textContent = photo.tags.slice(0, 5).join('　');
             body.append(tags);
           }
+          const metadataDetails = document.createElement('details');
+          metadataDetails.className = 'photo-details';
+          const metadataSummary = document.createElement('summary');
+          metadataSummary.textContent = '查看照片 metadata';
+          const metadataPanel = document.createElement('div');
+          metadataPanel.className = 'photo-metadata';
+          metadataPanel.textContent = '展開後向 Synology Photos 載入描述、EXIF 與檔案資訊。';
+          metadataDetails.append(metadataSummary, metadataPanel);
+          metadataDetails.addEventListener('toggle', async () => {
+            if (!metadataDetails.open || metadataDetails.dataset.loaded) return;
+            metadataDetails.dataset.loaded = 'loading';
+            metadataPanel.textContent = '正在讀取 metadata…';
+            try {
+              const metadataParams = new URLSearchParams({ space: data.space });
+              const metadataResponse = await fetch(`/api/photos/${encodeURIComponent(photo.id)}/metadata?${metadataParams}`);
+              const metadataResult = await metadataResponse.json();
+              if (!metadataResult.ok) throw new Error(metadataResult.error || 'metadata 讀取失敗');
+              const metadata = metadataResult.metadata;
+              const rows = [
+                ['description', '描述'], ['camera', '相機'], ['lens', '鏡頭'],
+                ['aperture', '光圈'], ['exposure_time', '曝光時間'], ['focal_length', '焦距'],
+                ['iso', 'ISO'], ['width', '寬度'], ['height', '高度'],
+                ['orientation', '方向'], ['filesize', '檔案大小'], ['latitude', '緯度'],
+                ['longitude', '經度'], ['city', '城市'], ['country', '國家']
+              ].filter(([key]) => metadata[key] !== null && metadata[key] !== undefined && metadata[key] !== '');
+              if (metadata.filesize) {
+                const units = ['B', 'KB', 'MB', 'GB'];
+                let size = Number(metadata.filesize);
+                let unit = 0;
+                while (size >= 1024 && unit < units.length - 1) { size /= 1024; unit += 1; }
+                rows.find(([key]) => key === 'filesize')[2] = `${size.toFixed(unit ? 1 : 0)} ${units[unit]}`;
+              }
+              metadataPanel.replaceChildren();
+              if (!rows.length && !metadata.tags?.length) {
+                metadataPanel.textContent = 'Synology Photos 沒有回傳其他 metadata。';
+              } else {
+                const grid = document.createElement('dl');
+                grid.className = 'metadata-grid';
+                for (const [key, label, formatted] of rows) {
+                  const term = document.createElement('dt');
+                  term.textContent = label;
+                  const value = document.createElement('dd');
+                  value.textContent = formatted ?? String(metadata[key]);
+                  grid.append(term, value);
+                }
+                if (metadata.tags?.length) {
+                  const term = document.createElement('dt');
+                  term.textContent = '既有標籤';
+                  const value = document.createElement('dd');
+                  value.textContent = metadata.tags.join('、');
+                  grid.append(term, value);
+                }
+                metadataPanel.append(grid);
+              }
+              metadataDetails.dataset.loaded = 'true';
+            } catch (error) {
+              metadataPanel.textContent = error.message || '無法載入照片 metadata。';
+              metadataDetails.dataset.loaded = '';
+            }
+          });
+          body.append(metadataDetails);
           const id = document.createElement('span');
           id.className = 'photo-id';
           id.textContent = `ID ${photo.id ?? '—'}`;

@@ -195,6 +195,33 @@ def item_summary(item: dict) -> dict:
     }
 
 
+def item_metadata(item: dict) -> dict:
+    additional = item.get("additional") if isinstance(item.get("additional"), dict) else {}
+    exif = additional.get("exif") if isinstance(additional.get("exif"), dict) else {}
+    address = additional.get("address") if isinstance(additional.get("address"), dict) else {}
+    gps = additional.get("gps") if isinstance(additional.get("gps"), dict) else {}
+    resolution = additional.get("resolution") if isinstance(additional.get("resolution"), dict) else {}
+    tags = additional.get("tag") if isinstance(additional.get("tag"), list) else []
+    return {
+        "description": additional.get("description"),
+        "camera": exif.get("camera"),
+        "lens": exif.get("lens"),
+        "aperture": exif.get("aperture"),
+        "exposure_time": exif.get("exposure_time"),
+        "focal_length": exif.get("focal_length"),
+        "iso": exif.get("iso"),
+        "orientation": additional.get("orientation"),
+        "width": resolution.get("width"),
+        "height": resolution.get("height"),
+        "filesize": item.get("filesize"),
+        "latitude": gps.get("latitude"),
+        "longitude": gps.get("longitude"),
+        "city": address.get("city"),
+        "country": address.get("country"),
+        "tags": [tag.get("name") for tag in tags if isinstance(tag, dict) and tag.get("name")],
+    }
+
+
 def is_japan(photo: dict) -> bool:
     country = str(photo.get("country") or "").strip().casefold()
     return country == "jp" or "japan" in country or "日本" in country
@@ -540,6 +567,44 @@ def list_photos():
                 "photos": photos,
             }
         )
+    except SynologyApiError as exc:
+        status = 502 if exc.error_code is None else 403
+        return jsonify({"ok": False, "error": str(exc), "error_code": exc.error_code}), status
+
+
+@app.get("/api/photos/<int:photo_id>/metadata")
+def photo_metadata(photo_id: int):
+    nas = current_nas_session()
+    if not nas:
+        return jsonify({"ok": False, "error": "請先登入 Synology Photos。"}), 401
+    space = request.args.get("space", "personal")
+    if space not in {"personal", "shared"}:
+        return jsonify({"ok": False, "error": "空間類型無效。"}), 400
+
+    api_name = "SYNO.Foto.Browse.Item" if space == "personal" else "SYNO.FotoTeam.Browse.Item"
+    try:
+        url, version = api_endpoint(nas, api_name)
+        payload = post_synology(
+            nas.client,
+            url,
+            {
+                "api": api_name,
+                "version": version,
+                "method": "get",
+                "id": json.dumps([photo_id], separators=(",", ":")),
+                "additional": json.dumps(
+                    ["exif", "description", "orientation", "resolution", "gps", "address", "tag"],
+                    separators=(",", ":"),
+                ),
+                "_sid": nas.sid,
+            },
+        )
+        data = payload.get("data")
+        items = data.get("list") if isinstance(data, dict) else None
+        if not isinstance(items, list) or not items or not isinstance(items[0], dict):
+            return jsonify({"ok": False, "error": "Photos API 沒有回傳這張照片的詳細資料。"}), 404
+        item = items[0]
+        return jsonify({"ok": True, "photo_id": photo_id, "metadata": item_metadata(item)})
     except SynologyApiError as exc:
         status = 502 if exc.error_code is None else 403
         return jsonify({"ok": False, "error": str(exc), "error_code": exc.error_code}), status
