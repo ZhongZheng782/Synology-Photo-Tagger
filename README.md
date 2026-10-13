@@ -272,9 +272,9 @@
 
 ## Docker 開發版
 
-目前容器提供繁體中文 Web 首頁、唯讀 Photos API 探測與照片清單瀏覽。使用者可在 UI 輸入 NAS 帳密（支援選填 OTP），登入後切換個人空間／共享空間，以分頁方式查看照片 ID、檔名、拍攝時間、地點及既有標籤；可選擇只顯示目前頁面中地點為日本的項目。NAS Session ID 保存在服務程序記憶體中，瀏覽器只持有簽章後的隨機工作階段識別碼；服務重新啟動後需重新登入。照片 API 使用原生 HTTP 呼叫，`synology-api` 套件仍安裝於映像供後續整合評估。
+目前容器提供繁體中文 Web 首頁、唯讀 Photos API 探測與照片清單瀏覽。使用者可在 UI 輸入 NAS 帳密（支援選填 OTP），登入後切換個人空間／共享空間，以分頁方式查看照片 ID、檔名、拍攝時間、地點及既有標籤；清單會透過本站的縮圖代理顯示 Synology Photos 中尺寸為 M 或 SM 的預覽，並可選擇只顯示目前頁面中地點為日本的項目。NAS Session ID 保存在服務程序記憶體中，瀏覽器只持有簽章後的隨機工作階段識別碼；服務重新啟動後需重新登入。照片 API 使用原生 HTTP 呼叫，`synology-api` 套件仍安裝於映像供後續整合評估。
 
-此階段不下載縮圖或原圖、不讀取掛載目錄中的檔案、不修改標籤，也不執行 AI 標記。Photos API 的 item ID、folder ID 與 `/Photos` 下原檔路徑尚未建立對照；日本篩選目前只比對已載入的單一頁面，不能代表完整相片庫的搜尋結果。
+此階段只透過 Photos API 取得縮圖，不下載原圖、不讀取掛載目錄中的檔案、不修改標籤，也不執行 AI 標記。縮圖透過需要登入的本站端點代理，NAS Session ID 不會放進瀏覽器的縮圖 URL。Photos API 的 item ID、folder ID 與 `/Photos` 下原檔路徑尚未建立對照；日本篩選目前只比對已載入的單一頁面，不能代表完整相片庫的搜尋結果。
 
 1. 複製 `.env.example` 為 `.env`，填入 NAS 的 DSM 根網址與照片目錄路徑。`SYNOLOGY_URL` 必須使用可由 NAS 容器連線、且 TLS 憑證可驗證的網址。此 NAS 可使用 `https://wenchiehlee.synology.me:7778`。
 2. 執行 `docker compose up -d --build`。
