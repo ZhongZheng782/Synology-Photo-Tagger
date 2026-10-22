@@ -200,6 +200,7 @@ def item_summary(item: dict) -> dict:
         "width": resolution.get("width"),
         "height": resolution.get("height"),
         "thumbnail_cache_key": thumbnail.get("cache_key"),
+        "thumbnail_unit_id": thumbnail.get("unit_id"),
         "thumbnail_ready": thumbnail.get("m") == "ready" or thumbnail.get("sm") == "ready",
         "thumbnail_size": "m" if thumbnail.get("m") == "ready" else "sm",
         "tags": [tag.get("name") for tag in tags if isinstance(tag, dict) and tag.get("name")],
@@ -840,14 +841,50 @@ def photo_original_check(photo_id: int):
     cache_key = request.args.get("cache_key", "")
     if space not in {"personal", "shared"}:
         return jsonify({"ok": False, "error": "空間類型無效。"}), 400
-    if not cache_key or len(cache_key) > 80 or not all(
-        part.isdigit() for part in cache_key.split("_", 1)
-    ) or "_" not in cache_key:
+    if cache_key and (
+        len(cache_key) > 80
+        or "_" not in cache_key
+        or not all(part.isdigit() for part in cache_key.split("_", 1))
+    ):
         return jsonify({"ok": False, "error": "原檔識別碼格式無效。"}), 400
 
     api_name = "SYNO.Foto.Download" if space == "personal" else "SYNO.FotoTeam.Download"
     try:
         url, version = api_endpoint(nas, api_name)
+        unit_id = request.args.get("unit_id", str(photo_id))
+        if not unit_id.isdigit():
+            return jsonify({"ok": False, "error": "原檔項目識別碼格式無效。"}), 400
+        if not cache_key:
+            browse_api = "SYNO.Foto.Browse.Item" if space == "personal" else "SYNO.FotoTeam.Browse.Item"
+            browse_url, browse_version = api_endpoint(nas, browse_api)
+            item_payload = post_synology(
+                nas.client,
+                browse_url,
+                {
+                    "api": browse_api,
+                    "version": browse_version,
+                    "method": "get",
+                    "id": json.dumps([photo_id], separators=(",", ":")),
+                    "additional": json.dumps(["thumbnail"], separators=(",", ":")),
+                    "_sid": nas.sid,
+                },
+            )
+            item_data = item_payload.get("data")
+            items = item_data.get("list") if isinstance(item_data, dict) else None
+            item = items[0] if isinstance(items, list) and items and isinstance(items[0], dict) else {}
+            additional = item.get("additional") if isinstance(item.get("additional"), dict) else {}
+            thumbnail = additional.get("thumbnail") if isinstance(additional.get("thumbnail"), dict) else {}
+            cache_key = thumbnail.get("cache_key", "")
+            resolved_unit_id = thumbnail.get("unit_id")
+            if isinstance(resolved_unit_id, int):
+                unit_id = str(resolved_unit_id)
+            if not cache_key:
+                return jsonify(
+                    {
+                        "ok": False,
+                        "error": "Synology Photos 尚未提供這張照片的原檔識別資料，請稍後重試。",
+                    }
+                ), 404
     except SynologyApiError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 502
 
@@ -860,7 +897,7 @@ def photo_original_check(photo_id: int):
                 "version": version,
                 "method": "download",
                 "cache_key": cache_key,
-                "unit_id": json.dumps([photo_id], separators=(",", ":")),
+                "unit_id": json.dumps([int(unit_id)], separators=(",", ":")),
                 "_sid": nas.sid,
             },
             stream=True,
