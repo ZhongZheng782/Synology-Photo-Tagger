@@ -361,7 +361,7 @@
             }
           });
           body.append(metadataDetails);
-          if (photo.type === 'photo' && photo.thumbnail_cache_key && photo.id !== null) {
+          if (photo.type !== 'video' && photo.id !== null) {
             const originalCheck = document.createElement('div');
             originalCheck.className = 'original-check';
             const checkButton = document.createElement('button');
@@ -376,7 +376,9 @@
               checkResult.textContent = '正在串流檢查…';
               checkResult.classList.remove('error-text');
               try {
-                const params = new URLSearchParams({ space: data.space, cache_key: photo.thumbnail_cache_key });
+                const params = new URLSearchParams({ space: data.space });
+                if (photo.thumbnail_cache_key) params.set('cache_key', photo.thumbnail_cache_key);
+                if (photo.thumbnail_unit_id) params.set('unit_id', photo.thumbnail_unit_id);
                 const response = await fetch(`/api/photos/${encodeURIComponent(photo.id)}/original-check?${params}`);
                 const result = await response.json();
                 if (!result.ok) throw new Error(result.error || '原檔檢查失敗');
