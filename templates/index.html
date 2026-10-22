@@ -361,6 +361,40 @@
             }
           });
           body.append(metadataDetails);
+          if (photo.type === 'photo' && photo.thumbnail_cache_key && photo.id !== null) {
+            const originalCheck = document.createElement('div');
+            originalCheck.className = 'original-check';
+            const checkButton = document.createElement('button');
+            checkButton.className = 'secondary-button';
+            checkButton.type = 'button';
+            checkButton.textContent = '檢查原檔（唯讀）';
+            const checkResult = document.createElement('span');
+            checkResult.className = 'original-check-result';
+            checkResult.setAttribute('aria-live', 'polite');
+            checkButton.addEventListener('click', async () => {
+              checkButton.disabled = true;
+              checkResult.textContent = '正在串流檢查…';
+              checkResult.classList.remove('error-text');
+              try {
+                const params = new URLSearchParams({ space: data.space, cache_key: photo.thumbnail_cache_key });
+                const response = await fetch(`/api/photos/${encodeURIComponent(photo.id)}/original-check?${params}`);
+                const result = await response.json();
+                if (!result.ok) throw new Error(result.error || '原檔檢查失敗');
+                const units = ['B', 'KB', 'MB', 'GB'];
+                let size = result.bytes_read;
+                let unit = 0;
+                while (size >= 1024 && unit < units.length - 1) { size /= 1024; unit += 1; }
+                checkResult.textContent = `${result.format} · ${size.toFixed(unit ? 1 : 0)} ${units[unit]} · 已讀取但未保存/回傳`;
+              } catch (error) {
+                checkResult.textContent = error.message || '原檔檢查失敗';
+                checkResult.classList.add('error-text');
+              } finally {
+                checkButton.disabled = false;
+              }
+            });
+            originalCheck.append(checkButton, checkResult);
+            body.append(originalCheck);
+          }
           const id = document.createElement('span');
           id.className = 'photo-id';
           id.textContent = `ID ${photo.id ?? '—'}`;

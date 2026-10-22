@@ -828,3 +828,111 @@ def photo_thumbnail(photo_id: int):
     result = Response(image, mimetype=content_type)
     result.headers["X-Content-Type-Options"] = "nosniff"
     return result
+
+
+@app.get("/api/photos/<int:photo_id>/original-check")
+def photo_original_check(photo_id: int):
+    """Read an original Photo item as a stream and return only format/size metadata."""
+    nas = current_nas_session()
+    if not nas:
+        return jsonify({"ok": False, "error": "請先登入 Synology Photos。"}), 401
+    space = request.args.get("space", "personal")
+    cache_key = request.args.get("cache_key", "")
+    if space not in {"personal", "shared"}:
+        return jsonify({"ok": False, "error": "空間類型無效。"}), 400
+    if not cache_key or len(cache_key) > 80 or not all(
+        part.isdigit() for part in cache_key.split("_", 1)
+    ) or "_" not in cache_key:
+        return jsonify({"ok": False, "error": "原檔識別碼格式無效。"}), 400
+
+    api_name = "SYNO.Foto.Download" if space == "personal" else "SYNO.FotoTeam.Download"
+    try:
+        url, version = api_endpoint(nas, api_name)
+    except SynologyApiError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 502
+
+    response = None
+    try:
+        response = nas.client.get(
+            url,
+            params={
+                "api": api_name,
+                "version": version,
+                "method": "download",
+                "cache_key": cache_key,
+                "unit_id": json.dumps([photo_id], separators=(",", ":")),
+                "_sid": nas.sid,
+            },
+            stream=True,
+            timeout=(4, 30),
+        )
+        response.raise_for_status()
+        upstream_type = response.headers.get("Content-Type", "").split(";", 1)[0].lower()
+        if "json" in upstream_type or "text/plain" in upstream_type:
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = None
+            if isinstance(payload, dict) and not payload.get("success", True):
+                return jsonify(
+                    {
+                        "ok": False,
+                        "error": "Synology Photos 拒絕原檔讀取。",
+                        "error_code": api_error(payload),
+                    }
+                ), 502
+
+        byte_count = 0
+        prefix = bytearray()
+        for chunk in response.iter_content(chunk_size=64 * 1024):
+            if not chunk:
+                continue
+            byte_count += len(chunk)
+            if len(prefix) < 32:
+                prefix.extend(chunk[: 32 - len(prefix)])
+    except requests.exceptions.SSLError:
+        return jsonify({"ok": False, "error": "NAS TLS 憑證驗證失敗。"}), 502
+    except requests.exceptions.Timeout:
+        return jsonify({"ok": False, "error": "讀取原檔逾時。"}), 504
+    except requests.exceptions.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else "未知"
+        return jsonify({"ok": False, "error": f"NAS 回傳 HTTP {status}。"}), 502
+    except requests.exceptions.RequestException:
+        return jsonify({"ok": False, "error": "無法讀取照片原檔。"}), 502
+    finally:
+        if response is not None:
+            response.close()
+
+    header = bytes(prefix)
+    detected_format = None
+    if header.startswith(b"\xff\xd8\xff"):
+        detected_format = "JPEG"
+    elif len(header) >= 12 and header[4:8] == b"ftyp" and header[8:12] in {
+        b"heic", b"heix", b"hevc", b"hevx", b"heif", b"mif1", b"msf1",
+    }:
+        detected_format = "HEIC/HEIF"
+    elif header.startswith(b"\x89PNG\r\n\x1a\n"):
+        detected_format = "PNG"
+
+    if not byte_count or detected_format is None:
+        return jsonify(
+            {
+                "ok": False,
+                "error": "Photos API 有回應，但內容不是可辨識的 JPEG、HEIC/HEIF 或 PNG 原檔。",
+                "bytes_read": byte_count,
+                "content_type": upstream_type,
+            }
+        ), 502
+    return jsonify({
+        "ok": True,
+        "photo_id": photo_id,
+        "space": space,
+        "api": api_name,
+        "api_version": version,
+        "format": detected_format,
+        "bytes_read": byte_count,
+        "content_type": upstream_type or None,
+        "signature_hex": header[:16].hex(),
+        "stored": False,
+        "image_returned": False,
+    })
