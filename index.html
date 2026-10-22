@@ -81,6 +81,36 @@
       .button:hover { transform: translateY(-1px); background: #f6f9f6; }
       .button.primary { border-color: var(--green); background: var(--green); color: white; }
       .button.primary:hover { background: var(--green-dark); }
+      .pull-command {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        margin-top: 20px;
+        padding: 14px 14px 14px 18px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: #f7f9f6;
+      }
+      .pull-copy { min-width: 0; }
+      .pull-label { display: block; margin-bottom: 4px; color: var(--muted); font-size: .78rem; font-weight: 700; }
+      .pull-command code { color: var(--ink); font: 500 .9rem/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
+      .copy-button {
+        flex: 0 0 auto;
+        min-height: 42px;
+        padding: 0 14px;
+        border: 1px solid #cbd8ce;
+        border-radius: 10px;
+        background: white;
+        color: var(--green-dark);
+        font: inherit;
+        font-size: .9rem;
+        font-weight: 700;
+        cursor: pointer;
+      }
+      .copy-button:hover { background: #edf5ef; }
+      .copy-button:focus-visible, .button:focus-visible { outline: 3px solid #9fc9aa; outline-offset: 3px; }
+      .copy-status { min-height: 1.4em; margin: 6px 2px 0; color: var(--green-dark); font-size: .82rem; }
       .details {
         display: flex;
         flex-wrap: wrap;
@@ -109,8 +139,15 @@
       <p class="intro">Browse your Synology Photos library, preview images, and inspect their metadata in one focused workspace. AI-assisted tagging is the next step.</p>
       <div class="actions">
         <a class="button primary" href="https://newton.tail28f10.ts.net:15056/">Open live demo <span aria-hidden="true">↗</span></a>
-        <a class="button" href="https://hub.docker.com/r/wenchiehlee1020/synology-photo-tagger">Get the Docker image <span aria-hidden="true">↗</span></a>
       </div>
+      <div class="pull-command">
+        <div class="pull-copy">
+          <span class="pull-label">Pull the Docker image</span>
+          <code id="docker-command">docker pull wenchiehlee1020/synology-photo-tagger:v0.1</code>
+        </div>
+        <button class="copy-button" id="copy-command" type="button">Copy</button>
+      </div>
+      <p class="copy-status" id="copy-status" role="status" aria-live="polite"></p>
       <div class="details">
         <span><strong>Current release</strong> v0.1</span>
         <span><strong>Project</strong> Open source</span>
@@ -118,5 +155,27 @@
       </div>
       <footer>Read the <a href="https://github.com/ZhongZheng782/Synology-Photo-Tagger#readme">project README</a> for setup details and current capabilities.</footer>
     </main>
+    <script>
+      const command = document.getElementById("docker-command").textContent;
+      const copyButton = document.getElementById("copy-command");
+      const copyStatus = document.getElementById("copy-status");
+
+      copyButton.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(command);
+          copyStatus.textContent = "Docker command copied.";
+          copyButton.textContent = "Copied!";
+        } catch {
+          const selection = window.getSelection();
+          const range = document.createRange();
+          range.selectNodeContents(document.getElementById("docker-command"));
+          selection.removeAllRanges();
+          selection.addRange(range);
+          copyStatus.textContent = "Select and copy the command above.";
+          copyButton.textContent = "Select command";
+        }
+        window.setTimeout(() => { copyButton.textContent = "Copy"; }, 2200);
+      });
+    </script>
   </body>
 </html>
