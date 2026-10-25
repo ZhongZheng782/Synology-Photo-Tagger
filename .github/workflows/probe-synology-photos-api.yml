@@ -33,3 +33,47 @@ jobs:
           }
           print(json.dumps(apis, ensure_ascii=False, indent=2))
           ' "${response_file}"
+
+      - name: Check MLX connectivity from the Photo Tagger container
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker exec -i SYNOLOGY-PHOTO-TAGGER python3 - <<'PY'
+          import os
+          import socket
+          import sys
+          from urllib.error import HTTPError, URLError
+          from urllib.parse import urlsplit
+          from urllib.request import urlopen
+
+          base_url = os.environ.get("MLX_SERVER_URL", "")
+          parsed = urlsplit(base_url)
+          host = parsed.hostname
+          port = parsed.port or (443 if parsed.scheme == "https" else 80)
+          print(f"MLX endpoint host={host} port={port}")
+          print(f"MLX API key configured={bool(os.environ.get('MLX_SERVER_API_KEY'))}")
+          if not host:
+              raise SystemExit("MLX_SERVER_URL is empty or invalid")
+
+          try:
+              addresses = sorted({entry[4][0] for entry in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)})
+              print(f"DNS resolved={addresses}")
+          except OSError as error:
+              raise SystemExit(f"DNS lookup failed: {type(error).__name__}: {error}")
+
+          try:
+              with socket.create_connection((host, port), timeout=8):
+                  print("TCP connection=ok")
+          except OSError as error:
+              raise SystemExit(f"TCP connection failed: {type(error).__name__}: {error}")
+
+          try:
+              with urlopen(base_url.rstrip("/") + "/health", timeout=8) as response:
+                  print(f"MLX health HTTP={response.status}")
+                  print(f"MLX health body={response.read(500).decode('utf-8', 'replace')}")
+          except HTTPError as error:
+              print(f"MLX health HTTP={error.code}")
+              print(f"MLX health body={error.read(500).decode('utf-8', 'replace')}")
+          except (OSError, URLError) as error:
+              raise SystemExit(f"MLX health request failed: {type(error).__name__}: {error}")
+          PY
