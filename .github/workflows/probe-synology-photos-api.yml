@@ -40,8 +40,8 @@ jobs:
               print(f"DNS lookup failed: {type(error).__name__}: {error}")
               addresses = []
 
-          # Current Tailscale IPv4 for the Mac-mini, used only to distinguish DNS from routing failures.
-          candidates = addresses or ["100.99.115.6"]
+          # Current interface addresses distinguish Docker DNS/Tailscale routing from LAN reachability.
+          candidates = addresses or ["100.99.115.6", "192.168.31.133", "192.168.31.82"]
           for address in candidates:
               try:
                   with socket.create_connection((address, port), timeout=8):
@@ -71,15 +71,18 @@ jobs:
           from urllib.request import urlopen
 
           host = "mac-mini.tail28f10.ts.net"
-          address = "100.99.115.6"
+          addresses = ["100.99.115.6", "192.168.31.133", "192.168.31.82"]
           try:
               print("host DNS:", sorted({item[4][0] for item in socket.getaddrinfo(host, 5001, type=socket.SOCK_STREAM)}))
           except OSError as error:
               print(f"host DNS failed: {type(error).__name__}: {error}")
-          with socket.create_connection((address, 5001), timeout=8):
-              print("host-network TCP to Tailscale IP: ok")
-          with urlopen(f"http://{address}:5001/health", timeout=8) as response:
-              print(f"host-network MLX health HTTP={response.status}")
-              print(response.read(500).decode("utf-8", "replace"))
+          for address in addresses:
+              try:
+                  with socket.create_connection((address, 5001), timeout=3):
+                      print(f"host-network TCP to {address}: ok")
+                  with urlopen(f"http://{address}:5001/health", timeout=3) as response:
+                      print(f"host-network MLX health at {address} HTTP={response.status}")
+              except OSError as error:
+                  print(f"host-network request to {address} failed: {type(error).__name__}: {error}")
           PY
           PY
