@@ -25,7 +25,6 @@ COPY app.py ./
 COPY templates ./templates
 COPY static ./static
 COPY entrypoint.sh ./
-COPY sshd_config /etc/ssh/sshd_config
 RUN chmod 755 /app/entrypoint.sh
 
 EXPOSE 5000 22
