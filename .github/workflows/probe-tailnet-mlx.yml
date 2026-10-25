@@ -93,12 +93,12 @@ jobs:
               raise SystemExit(1)
           PY
 
-          python3 - <<'PY'
+          docker exec -i SYNOLOGY-PHOTO-TAGGER python3 - <<'PY'
           import requests
 
           try:
               response = requests.post(
-                  "http://127.0.0.1:5056/api/photos/1/analyze?space=personal",
+                  "http://127.0.0.1:5000/api/photos/1/analyze?space=personal",
                   timeout=8,
               )
               print(f"Local analyze route HTTP={response.status_code}")
