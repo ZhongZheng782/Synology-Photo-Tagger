@@ -1,4 +1,4 @@
-name: Probe Synology Photos API
+name: Diagnose Photo Tagger to MLX connectivity
 
 on:
   workflow_dispatch:
@@ -7,33 +7,11 @@ permissions:
   contents: read
 
 jobs:
-  discover-api:
+  diagnose-mlx:
     # The NAS-hosted runner can reach DSM over the LAN.
     runs-on: [self-hosted, linux, x64, ubuntu-latest]
     timeout-minutes: 2
     steps:
-      - name: Query DSM WebAPI discovery endpoint
-        shell: bash
-        run: |
-          set -euo pipefail
-          response_file="${RUNNER_TEMP}/synology-api-info.json"
-          curl --fail --silent --show-error --max-time 15 \
-            --output "${response_file}" \
-            'http://192.168.31.101:5000/webapi/query.cgi?api=SYNO.API.Info&version=1&method=query&query=all'
-          python3 -c '
-          import json, sys
-          with open(sys.argv[1], encoding="utf-8") as f:
-              response = json.load(f)
-          if not response.get("success"):
-              raise SystemExit(json.dumps(response, ensure_ascii=False))
-          apis = {
-              name: info
-              for name, info in response.get("data", {}).items()
-              if name.startswith(("SYNO.Foto", "SYNO.FotoTeam"))
-          }
-          print(json.dumps(apis, ensure_ascii=False, indent=2))
-          ' "${response_file}"
-
       - name: Check MLX connectivity from the Photo Tagger container
         shell: bash
         run: |
