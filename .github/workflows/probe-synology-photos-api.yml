@@ -47,7 +47,8 @@ jobs:
                   with socket.create_connection((address, port), timeout=8):
                       print(f"TCP connection to {address}=ok")
               except OSError as error:
-                  raise SystemExit(f"TCP connection to {address} failed: {type(error).__name__}: {error}")
+                  print(f"TCP connection to {address} failed: {type(error).__name__}: {error}")
+                  continue
 
               try:
                   health_url = f"{parsed.scheme}://{address}:{port}/health"
@@ -58,5 +59,27 @@ jobs:
                   print(f"MLX health HTTP={error.code}")
                   print(f"MLX health body={error.read(500).decode('utf-8', 'replace')}")
               except (OSError, URLError) as error:
-                  raise SystemExit(f"MLX health request to {address} failed: {type(error).__name__}: {error}")
+                  print(f"MLX health request to {address} failed: {type(error).__name__}: {error}")
+
+      - name: Test MLX reachability with NAS host networking
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run -i --rm --network host --entrypoint python3 \
+            wenchiehlee1020/synology-photo-tagger:v0.2 - <<'PY'
+          import socket
+          from urllib.request import urlopen
+
+          host = "mac-mini.tail28f10.ts.net"
+          address = "100.99.115.6"
+          try:
+              print("host DNS:", sorted({item[4][0] for item in socket.getaddrinfo(host, 5001, type=socket.SOCK_STREAM)}))
+          except OSError as error:
+              print(f"host DNS failed: {type(error).__name__}: {error}")
+          with socket.create_connection((address, 5001), timeout=8):
+              print("host-network TCP to Tailscale IP: ok")
+          with urlopen(f"http://{address}:5001/health", timeout=8) as response:
+              print(f"host-network MLX health HTTP={response.status}")
+              print(response.read(500).decode("utf-8", "replace"))
+          PY
           PY
