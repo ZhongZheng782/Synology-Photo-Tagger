@@ -37,21 +37,26 @@ jobs:
               addresses = sorted({entry[4][0] for entry in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)})
               print(f"DNS resolved={addresses}")
           except OSError as error:
-              raise SystemExit(f"DNS lookup failed: {type(error).__name__}: {error}")
+              print(f"DNS lookup failed: {type(error).__name__}: {error}")
+              addresses = []
 
-          try:
-              with socket.create_connection((host, port), timeout=8):
-                  print("TCP connection=ok")
-          except OSError as error:
-              raise SystemExit(f"TCP connection failed: {type(error).__name__}: {error}")
+          # Current Tailscale IPv4 for the Mac-mini, used only to distinguish DNS from routing failures.
+          candidates = addresses or ["100.99.115.6"]
+          for address in candidates:
+              try:
+                  with socket.create_connection((address, port), timeout=8):
+                      print(f"TCP connection to {address}=ok")
+              except OSError as error:
+                  raise SystemExit(f"TCP connection to {address} failed: {type(error).__name__}: {error}")
 
-          try:
-              with urlopen(base_url.rstrip("/") + "/health", timeout=8) as response:
-                  print(f"MLX health HTTP={response.status}")
-                  print(f"MLX health body={response.read(500).decode('utf-8', 'replace')}")
-          except HTTPError as error:
-              print(f"MLX health HTTP={error.code}")
-              print(f"MLX health body={error.read(500).decode('utf-8', 'replace')}")
-          except (OSError, URLError) as error:
-              raise SystemExit(f"MLX health request failed: {type(error).__name__}: {error}")
+              try:
+                  health_url = f"{parsed.scheme}://{address}:{port}/health"
+                  with urlopen(health_url, timeout=8) as response:
+                      print(f"MLX health HTTP={response.status}")
+                      print(f"MLX health body={response.read(500).decode('utf-8', 'replace')}")
+              except HTTPError as error:
+                  print(f"MLX health HTTP={error.code}")
+                  print(f"MLX health body={error.read(500).decode('utf-8', 'replace')}")
+              except (OSError, URLError) as error:
+                  raise SystemExit(f"MLX health request to {address} failed: {type(error).__name__}: {error}")
           PY
