@@ -24,4 +24,7 @@ services:
     volumes:
       - ${PHOTO_LIBRARY_PATH:-/volume1/homes/wjlee/Photos}:/Photos:ro
       - ${DEBUG_SSH_DIR:-/volume1/docker/synology-photo-tagger/ssh}:/run/ssh:ro
-      - ${TAILSCALE_STATE_DIR:-/volume1/docker/synology-photo-tagger/tailscale-state}:/var/lib/tailscale
+      - tailscale-state:/var/lib/tailscale
+
+volumes:
+  tailscale-state:

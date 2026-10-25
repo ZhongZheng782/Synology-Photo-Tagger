@@ -25,7 +25,7 @@ docker compose up -d
 
 Open `http://localhost:5056/`. Set `SYNOLOGY_URL` to the DSM address reachable from the container. Sign in through the web UI with a Synology account that can access Photos.
 
-The provided Compose file uses the `v0.3` image tag. Set `MLX_SERVER_URL`, `MLX_SERVER_API_KEY`, and a dedicated Tailscale `TAILSCALE_AUTHKEY` in `.env` to enable analysis. Tailscale node state persists in `TAILSCALE_STATE_DIR`. To run the latest published build instead, change the image tag to `latest`.
+The provided Compose file uses the `v0.3` image tag. Set `MLX_SERVER_URL`, `MLX_SERVER_API_KEY`, and a dedicated Tailscale `TAILSCALE_AUTHKEY` in `.env` to enable analysis. Tailscale node state persists in a Docker named volume. To run the latest published build instead, change the image tag to `latest`.
 
 ## Image
 

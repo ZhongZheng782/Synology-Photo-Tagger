@@ -1,0 +1,51 @@
+name: Verify Photo Tagger Tailscale to MLX
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: [self-hosted, linux, x64, ubuntu-latest]
+    timeout-minutes: 2
+    steps:
+      - name: Check connectivity without logging node or response details
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker exec -i SYNOLOGY-PHOTO-TAGGER python3 - <<'PY'
+          import os
+          import subprocess
+          import requests
+
+          socket_path = "/var/run/tailscale/tailscaled.sock"
+          status = subprocess.run(
+              ["tailscale", f"--socket={socket_path}", "ip", "-4"],
+              capture_output=True,
+              text=True,
+              timeout=10,
+          )
+          tailscale_connected = status.returncode == 0 and bool(status.stdout.strip())
+          print(f"Tailscale connected={tailscale_connected}")
+          print(f"Tailscale auth key configured={bool(os.environ.get('TAILSCALE_AUTHKEY'))}")
+          print(f"MLX API key configured={bool(os.environ.get('MLX_SERVER_API_KEY'))}")
+
+          base_url = os.environ.get("MLX_SERVER_URL", "").rstrip("/")
+          proxy = os.environ.get("MLX_HTTP_PROXY", "")
+          mlx_reachable = False
+          if base_url and proxy:
+              try:
+                  response = requests.get(
+                      f"{base_url}/health",
+                      proxies={"http": proxy, "https": proxy},
+                      timeout=(8, 15),
+                  )
+                  mlx_reachable = response.ok
+              except requests.RequestException:
+                  pass
+          print(f"MLX reachable through Tailscale proxy={mlx_reachable}")
+          if not tailscale_connected or not mlx_reachable:
+              raise SystemExit(1)
+          PY

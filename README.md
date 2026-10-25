@@ -280,7 +280,7 @@
 
 日本篩選依 `additional.address.country` 回傳值比對；沒有國家地點資料的照片不會列入結果。原圖分析只在使用者逐張點選後執行，不會自動掃描相簿。
 
-1. 複製 `.env.example` 為 `.env`，填入 NAS 的 DSM 根網址、照片目錄路徑、`MLX_SERVER_API_KEY`，以及 Tailscale 管理後台建立的專用 reusable auth key `TAILSCALE_AUTHKEY`。MLX API key 必須與 Mac-mini 部署所用的值相同；兩者都不要提交到 Git。Tailscale 狀態會保存在 `TAILSCALE_STATE_DIR`，容器重建後沿用同一節點身分。MLX 請求透過 `MLX_HTTP_PROXY` 指定的本機 HTTP proxy 連入 Tailnet；Synology Photos API 流量不經 proxy。`MLX_SERVER_URL` 預設為 `http://mac-mini.tail28f10.ts.net:5001`。NAS 的 `SYNOLOGY_URL` 必須使用可由容器連線且 TLS 憑證可驗證的網址；此 NAS 可使用 `https://wenchiehlee.synology.me:7778`。
+1. 複製 `.env.example` 為 `.env`，填入 NAS 的 DSM 根網址、照片目錄路徑、`MLX_SERVER_API_KEY`，以及 Tailscale 管理後台建立的專用 reusable auth key `TAILSCALE_AUTHKEY`。MLX API key 必須與 Mac-mini 部署所用的值相同；兩者都不要提交到 Git。Tailscale 節點狀態會保存在 Docker named volume，容器重建後沿用同一節點身分。MLX 請求透過 `MLX_HTTP_PROXY` 指定的本機 HTTP proxy 連入 Tailnet；Synology Photos API 流量不經 proxy。`MLX_SERVER_URL` 預設為 `http://mac-mini.tail28f10.ts.net:5001`。NAS 的 `SYNOLOGY_URL` 必須使用可由容器連線且 TLS 憑證可驗證的網址；此 NAS 可使用 `https://wenchiehlee.synology.me:7778`。
 2. 執行 `docker compose up -d --build`。
 3. 瀏覽 `http://NAS_IP:5056`；可用 `WEB_PORT` 調整對外埠號。
 4. 按「探索 Photos API」確認模組後，在登入區輸入有 Synology Photos 權限的 NAS 帳號與密碼；有啟用雙重驗證時輸入當次 OTP。然後選擇空間並載入照片清單。
