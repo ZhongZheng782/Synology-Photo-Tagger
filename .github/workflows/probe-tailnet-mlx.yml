@@ -32,7 +32,24 @@ jobs:
               backend_state = json.loads(state_result.stdout).get("BackendState", "unknown")
           except (ValueError, AttributeError):
               backend_state = "unavailable"
-          print(f"Tailscale backend state={backend_state}")
+          login_ok = backend_state == "Running"
+          authkey = os.environ.get("TAILSCALE_AUTHKEY", "")
+          if not login_ok and authkey:
+              login = subprocess.run(
+                  [
+                      "tailscale",
+                      f"--socket={socket_path}",
+                      "up",
+                      f"--authkey={authkey}",
+                      f"--hostname={os.environ.get('TAILSCALE_HOSTNAME', 'synology-photo-tagger')}",
+                      "--accept-dns=true",
+                  ],
+                  capture_output=True,
+                  text=True,
+                  timeout=30,
+              )
+              login_ok = login.returncode == 0
+          print(f"Tailscale login successful={login_ok}")
           status = subprocess.run(
               ["tailscale", f"--socket={socket_path}", "ip", "-4"],
               capture_output=True,
