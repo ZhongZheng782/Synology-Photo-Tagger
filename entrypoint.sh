@@ -26,17 +26,18 @@ done
 
 if [ "$TAILSCALE_READY" = "true" ]; then
     TAILSCALE_SOCKET="/var/run/tailscale/tailscaled.sock"
-    if tailscale --socket="$TAILSCALE_SOCKET" ip -4 >/dev/null 2>&1; then
+    TAILSCALE_IP="$(tailscale --socket="$TAILSCALE_SOCKET" ip -4 2>/dev/null || true)"
+    if [ -n "$TAILSCALE_IP" ]; then
         tailscale --socket="$TAILSCALE_SOCKET" set \
             --hostname="${TAILSCALE_HOSTNAME:-synology-photo-tagger}" \
             --accept-dns=true
-        echo "Tailscale is connected: $(tailscale --socket="$TAILSCALE_SOCKET" ip -4)"
+        echo "Tailscale is connected."
     elif [ -n "${TAILSCALE_AUTHKEY:-}" ]; then
         tailscale --socket="$TAILSCALE_SOCKET" up \
             --authkey="$TAILSCALE_AUTHKEY" \
             --hostname="${TAILSCALE_HOSTNAME:-synology-photo-tagger}" \
             --accept-dns=true
-        echo "Tailscale is connected: $(tailscale --socket="$TAILSCALE_SOCKET" ip -4)"
+        echo "Tailscale is connected."
     else
         echo "Warning: TAILSCALE_AUTHKEY is not set and this container has no saved Tailscale login."
     fi

@@ -30,7 +30,7 @@ API_INFO_PARAMS = {
 API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.3")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.3.1")
 MLX_SERVER_URL = os.environ.get(
     "MLX_SERVER_URL", "http://mac-mini.tail28f10.ts.net:5001"
 ).strip().rstrip("/")
