@@ -1,12 +1,16 @@
 services:
   synology-photo-tagger:
-    image: wenchiehlee1020/synology-photo-tagger:v0.1
+    image: wenchiehlee1020/synology-photo-tagger:v0.2
     build: .
     container_name: SYNOLOGY-PHOTO-TAGGER
     restart: unless-stopped
     environment:
       PORT: 5000
       SYNOLOGY_URL: ${SYNOLOGY_URL:-}
+      MLX_SERVER_URL: ${MLX_SERVER_URL:-http://mac-mini.tail28f10.ts.net:5001}
+      MLX_SERVER_API_KEY: ${MLX_SERVER_API_KEY:-}
+      MLX_MODEL: ${MLX_MODEL:-mlx-gemma4}
+      MLX_TIMEOUT_SECONDS: ${MLX_TIMEOUT_SECONDS:-900}
       PHOTO_LIBRARY_PATH: /Photos
       DEBUG_SHELL: ${DEBUG_SHELL:-false}
     extra_hosts:

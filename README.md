@@ -272,20 +272,23 @@
 
 ## Docker 開發版
 
-目前發佈版本為 **v0.1**。Docker Hub 提供 `v0.1` 固定版本標籤與 `latest` 標籤；NAS Compose 預設固定使用 `v0.1`。Docker Hub Repository overview 的同步稿位於 [`DOCKERHUB.md`](DOCKERHUB.md)。
+目前待發佈版本為 **v0.2**。Docker Hub 發佈完成後提供 `v0.2` 固定版本標籤與 `latest` 標籤；NAS Compose 預設固定使用 `v0.2`。Docker Hub Repository overview 的同步稿位於 [`DOCKERHUB.md`](DOCKERHUB.md)。
 
-目前容器提供繁體中文 Web 首頁、唯讀 Photos API 探測與照片清單瀏覽。使用者可在 UI 輸入 NAS 帳密（支援選填 OTP），登入後切換個人空間／共享空間，以分頁方式查看照片 ID、檔名、拍攝時間、地點及既有標籤；清單會透過本站的縮圖代理顯示 Synology Photos 中尺寸為 M 或 SM 的預覽。展開照片卡片的 metadata 區塊時，服務會按需向 Photos API 取得描述、EXIF、解析度、GPS 與既有標籤。候選清單可依日本地點與既有標籤篩選，也可組合兩項條件；載入標籤時會逐頁掃描所選空間並顯示進度。篩選索引快取在服務程序記憶體中，登出或服務重新啟動後會清除。NAS Session ID 保存在服務程序記憶體中，瀏覽器只持有簽章後的隨機工作階段識別碼；服務重新啟動後需重新登入。照片 API 使用原生 HTTP 呼叫，`synology-api` 套件仍安裝於映像供後續整合評估。
+此版本提供繁體中文 Web 首頁、唯讀 Photos API 瀏覽與單張照片 AI 分析預覽。使用者可在 UI 輸入 NAS 帳密（支援選填 OTP），登入後切換個人空間／共享空間，以分頁方式查看照片 ID、檔名、拍攝時間、地點及既有標籤；縮圖由本站代理顯示，metadata 按需從 Photos API 取得。候選清單可依日本地點與既有標籤篩選。登入工作階段和篩選索引只保存在服務程序記憶體中。
 
-此階段只透過 Photos API 取得縮圖，不下載原圖、不讀取掛載目錄中的檔案、不修改標籤，也不執行 AI 標記。縮圖透過需要登入的本站端點代理，NAS Session ID 不會放進瀏覽器的縮圖 URL。Photos API 的 item ID、folder ID 與 `/Photos` 下原檔路徑尚未建立對照。日本篩選會依 `additional.address.country` 的回傳值比對；沒有國家地點資料的照片不會列入結果。
+點選照片卡片的「本機 AI 分析」後，服務以 Synology Photos API 串流取回單張原圖，記憶體暫存後送到 Tailscale 私有網路中的 Mac-mini MLX `/photo-analyze`；NAS 上的相片掛載仍為唯讀，原圖不寫入容器磁碟或回傳瀏覽器。Mac-mini 會處理 HEIC/HEIF 轉檔並清理暫存。模型產生的繁體中文描述與標籤只顯示為建議，不會寫入 Photos API 或照片檔案。每張原圖限制 30 MiB；超出上限需先使用其他工作流程處理。
 
-1. 複製 `.env.example` 為 `.env`，填入 NAS 的 DSM 根網址與照片目錄路徑。`SYNOLOGY_URL` 必須使用可由 NAS 容器連線、且 TLS 憑證可驗證的網址。此 NAS 可使用 `https://wenchiehlee.synology.me:7778`。
+日本篩選依 `additional.address.country` 回傳值比對；沒有國家地點資料的照片不會列入結果。原圖分析只在使用者逐張點選後執行，不會自動掃描相簿。
+
+1. 複製 `.env.example` 為 `.env`，填入 NAS 的 DSM 根網址、照片目錄路徑及 `MLX_SERVER_API_KEY`。API key 必須與 Mac-mini 部署所用的 `MLX_SERVER_API_KEY` 相同；不要提交到 Git。`MLX_SERVER_URL` 預設為 `http://mac-mini.tail28f10.ts.net:5001`，需確認 NAS 容器可經 Tailscale 連到 Mac-mini。NAS 的 `SYNOLOGY_URL` 必須使用可由容器連線且 TLS 憑證可驗證的網址；此 NAS 可使用 `https://wenchiehlee.synology.me:7778`。
 2. 執行 `docker compose up -d --build`。
 3. 瀏覽 `http://NAS_IP:5056`；可用 `WEB_PORT` 調整對外埠號。
 4. 按「探索 Photos API」確認模組後，在登入區輸入有 Synology Photos 權限的 NAS 帳號與密碼；有啟用雙重驗證時輸入當次 OTP。然後選擇空間並載入照片清單。
+5. 先選一張照片按「本機 AI 分析」，確認描述與標籤建議後再決定後續工作流程；本版本不會把建議寫回 Synology Photos。
 
 直接使用 HTTP 埠時，登入密碼會在瀏覽器與 Web UI 之間傳送；只應在可信任的 LAN 或 SSH tunnel 中使用。需要跨不可信網路存取時，應先透過 DSM 反向代理或其他 TLS 終端提供 HTTPS，再登入。NAS API 端連線會驗證 TLS 憑證，不支援關閉驗證。
 
-Compose 預設將個人空間 `/volume1/homes/wjlee/Photos` 唯讀掛載至容器的 `/Photos`。如 NAS 帳號或路徑不同，請調整 `PHOTO_LIBRARY_PATH`。`publish-image.yml` 可由 GitHub Actions 手動觸發，將多架構映像發佈至 `wenchiehlee1020/synology-photo-tagger`；需要設定 `DOCKERHUB_USERNAME` 與 `DOCKERHUB_TOKEN` repository secrets。
+Compose 預設將個人空間 `/volume1/homes/wjlee/Photos` 唯讀掛載至容器的 `/Photos`。AI 分析使用 Photos API，不讀取該掛載路徑。`publish-image.yml` 可由 GitHub Actions 手動觸發，將多架構映像發佈至 `wenchiehlee1020/synology-photo-tagger`；需要設定 `DOCKERHUB_USERNAME` 與 `DOCKERHUB_TOKEN` repository secrets。
 
 ### Debug shell
 

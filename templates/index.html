@@ -24,7 +24,7 @@
       </nav>
 
       <div class="sidebar-bottom">
-        <div class="privacy-note"><span class="privacy-icon">◈</span><div><strong>照片留在你的 NAS</strong><small>此服務不會上傳影像</small></div></div>
+        <div class="privacy-note"><span class="privacy-icon">◈</span><div><strong>分析留在你的私有網路</strong><small>原圖僅送到 Mac-mini MLX</small></div></div>
         <div class="version-label">{{ app_version }} · API 探索模式 <span class="live-dot"></span></div>
       </div>
     </aside>
@@ -53,7 +53,7 @@
       <section class="content-grid" id="connection">
         <article class="panel connection-panel">
           <div class="panel-heading"><div><p class="eyebrow">STEP 01 · CONNECTION</p><h2>連接你的照片庫</h2></div><span class="heading-icon">⌁</span></div>
-          <p class="panel-copy">先確認 NAS 可回應 Photos API，再以 NAS 帳號登入讀取照片清單。此版本僅使用唯讀清單 API。</p>
+          <p class="panel-copy">先確認 NAS 可回應 Photos API，再以 NAS 帳號登入讀取照片清單。AI 分析時才會透過 Photos API 串流讀取單張原圖。</p>
           <div class="connection-details">
             <div class="detail-row"><span>DSM 位址</span><strong class="mono">{% if base_url %}{{ base_url }}{% else %}尚未設定{% endif %}</strong></div>
             <div class="detail-row"><span>照片 API SDK</span><strong><span class="sdk-mark">Py</span> synology-api <span class="version-chip">{{ sdk_version }}</span></strong></div>
@@ -66,7 +66,7 @@
 
         <aside class="side-panels">
           <article class="mini-panel next-panel"><div class="mini-icon">✳</div><div class="mini-kicker">NEXT UP</div><h3>建立你的第一個<br>AI 標記工作</h3><p>從 Synology 相簿挑選照片，再讓本機模型辨識內容。</p><span class="coming-label">連線確認後即可開始</span></article>
-          <article class="mini-panel privacy-panel"><div class="privacy-heading"><span>◈</span><strong>隱私優先設計</strong></div><p>照片透過 NAS API 選取。原始檔以唯讀方式掛載，讓 AI 能在本機分析。</p><div class="privacy-foot"><span></span>你的資料由你掌握</div></article>
+          <article class="mini-panel privacy-panel"><div class="privacy-heading"><span>◈</span><strong>隱私優先設計</strong></div><p>原圖由 Photos API 唯讀取得，僅傳到你的 Mac-mini 本機 MLX 分析；不送第三方雲端，也不寫回照片標籤。</p><div class="privacy-foot"><span></span>你的資料由你掌握</div></article>
         </aside>
       </section>
 
@@ -96,7 +96,7 @@
           <div class="security-hint"><strong>連線提醒</strong><span>瀏覽器到此 Web UI 使用 HTTP。請只在可信任的區域網路或 SSH tunnel 中輸入 NAS 密碼；瀏覽器到 NAS API 的連線使用已驗證的 HTTPS。</span></div>
           <div class="result-box" id="auth-result" hidden aria-live="polite"></div>
         </article>
-        <aside class="mini-panel privacy-panel browse-note"><div class="privacy-heading"><span>◈</span><strong>唯讀照片瀏覽</strong></div><p>目前不會修改標籤、相片檔案或 Synology Photos 資料庫。選擇日本時會逐頁搜尋所選空間的相片庫。</p><div class="privacy-foot"><span></span>每頁最多 100 張</div></aside>
+        <aside class="mini-panel privacy-panel browse-note"><div class="privacy-heading"><span>◈</span><strong>唯讀照片瀏覽</strong></div><p>AI 分析結果只作建議顯示，不會修改標籤、相片檔案或 Synology Photos 資料庫。選擇日本時會逐頁搜尋所選空間的相片庫。</p><div class="privacy-foot"><span></span>每頁最多 100 張</div></aside>
       </section>
 
       <section class="module-panel photo-panel" id="photo-browser" {% if not logged_in %}hidden{% endif %}>
@@ -396,6 +396,72 @@
             });
             originalCheck.append(checkButton, checkResult);
             body.append(originalCheck);
+
+            const analyzeSection = document.createElement('section');
+            analyzeSection.className = 'photo-ai-analysis';
+            const analyzeButton = document.createElement('button');
+            analyzeButton.className = 'secondary-button';
+            analyzeButton.type = 'button';
+            analyzeButton.textContent = '本機 AI 分析';
+            const analysisResult = document.createElement('div');
+            analysisResult.className = 'photo-ai-result';
+            analysisResult.hidden = true;
+            analysisResult.setAttribute('aria-live', 'polite');
+            analyzeButton.addEventListener('click', async () => {
+              analyzeButton.disabled = true;
+              analyzeButton.textContent = '正在分析…';
+              analysisResult.hidden = false;
+              analysisResult.classList.remove('error-text');
+              analysisResult.textContent = '正在透過 Photos API 讀取原圖並送往 Mac-mini…';
+              try {
+                const params = new URLSearchParams({ space: data.space });
+                if (photo.thumbnail_cache_key) params.set('cache_key', photo.thumbnail_cache_key);
+                if (photo.thumbnail_unit_id) params.set('unit_id', photo.thumbnail_unit_id);
+                const response = await fetch(`/api/photos/${encodeURIComponent(photo.id)}/analyze?${params}`, { method: 'POST' });
+                const result = await response.json();
+                if (!result.ok) throw new Error(result.error || '照片分析失敗。');
+
+                analysisResult.replaceChildren();
+                const heading = document.createElement('strong');
+                heading.className = 'analysis-heading';
+                heading.textContent = 'AI 建議（尚未寫入 Synology Photos）';
+                analysisResult.append(heading);
+                if (result.analysis?.description) {
+                  const description = document.createElement('p');
+                  description.className = 'analysis-description';
+                  description.textContent = result.analysis.description;
+                  analysisResult.append(description);
+                }
+                if (result.analysis?.tags?.length) {
+                  const tags = document.createElement('div');
+                  tags.className = 'analysis-tags';
+                  for (const tag of result.analysis.tags) {
+                    const chip = document.createElement('span');
+                    chip.textContent = tag;
+                    tags.append(chip);
+                  }
+                  analysisResult.append(tags);
+                }
+                if (!result.analysis) {
+                  const raw = document.createElement('pre');
+                  raw.className = 'analysis-raw';
+                  raw.textContent = result.output || '模型沒有回傳可顯示的建議。';
+                  analysisResult.append(raw);
+                }
+                const metadata = document.createElement('small');
+                metadata.className = 'analysis-meta';
+                metadata.textContent = `${result.format} · ${result.model || 'MLX'} · ${Number(result.elapsed_s || 0).toFixed(1)} 秒 · 原圖未保存`;
+                analysisResult.append(metadata);
+              } catch (error) {
+                analysisResult.textContent = error.message || '照片分析失敗。';
+                analysisResult.classList.add('error-text');
+              } finally {
+                analyzeButton.disabled = false;
+                analyzeButton.textContent = '重新分析';
+              }
+            });
+            analyzeSection.append(analyzeButton, analysisResult);
+            body.append(analyzeSection);
           }
           const id = document.createElement('span');
           id.className = 'photo-id';

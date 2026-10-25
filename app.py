@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.metadata
+import io
 import json
 import os
 import secrets
@@ -29,7 +30,17 @@ API_INFO_PARAMS = {
 API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.1")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.2")
+MLX_SERVER_URL = os.environ.get(
+    "MLX_SERVER_URL", "http://mac-mini.tail28f10.ts.net:5001"
+).strip().rstrip("/")
+MLX_SERVER_API_KEY = os.environ.get("MLX_SERVER_API_KEY", "").strip()
+MLX_MODEL = os.environ.get("MLX_MODEL", "mlx-gemma4").strip() or "mlx-gemma4"
+MLX_TIMEOUT_SECONDS = max(30, int(os.environ.get("MLX_TIMEOUT_SECONDS", "900")))
+MAX_PHOTO_ANALYSIS_BYTES = 30 * 1024 * 1024
+PHOTO_ANALYSIS_PROMPT = """請用繁體中文客觀分析照片，並且只輸出一個合法 JSON 物件，不要加 Markdown 或其他文字：
+{"description":"一至兩句簡潔、只描述畫面可見事實的內容","tags":["3 至 8 個適合搜尋的短標籤"]}
+標籤只根據可見內容；若照片明確呈現購物情境才加入「購物」。不要推測人物身分、健康、年齡等敏感特徵；不確定時省略。"""
 
 
 @dataclass
@@ -231,6 +242,58 @@ def item_metadata(item: dict) -> dict:
         "city": address.get("city"),
         "country": address.get("country"),
         "tags": [tag.get("name") for tag in tags if isinstance(tag, dict) and tag.get("name")],
+    }
+
+
+def detect_photo_format(image: bytes) -> tuple[str, str, str] | None:
+    """Return display name, MIME type and extension for supported photo bytes."""
+    if image.startswith(b"\xff\xd8\xff"):
+        return "JPEG", "image/jpeg", "jpg"
+    if image.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "PNG", "image/png", "png"
+    if image.startswith(b"RIFF") and image[8:12] == b"WEBP":
+        return "WebP", "image/webp", "webp"
+    if len(image) >= 12 and image[4:8] == b"ftyp" and image[8:12] in {
+        b"heic", b"heix", b"hevc", b"hevx", b"heif", b"mif1", b"msf1",
+    }:
+        return "HEIC/HEIF", "image/heic", "heic"
+    return None
+
+
+def parse_photo_analysis(output: str) -> dict | None:
+    """Extract a safe, bounded description and tag list from model JSON output."""
+    text = output.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1]
+        if text.endswith("```"):
+            text = text[:-3].strip()
+    candidates = [text]
+    start, end = text.find("{"), text.rfind("}")
+    if start >= 0 and end > start:
+        candidates.append(text[start : end + 1])
+    parsed = None
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+            break
+        except ValueError:
+            continue
+    if not isinstance(parsed, dict):
+        return None
+    description = parsed.get("description")
+    raw_tags = parsed.get("tags")
+    tags = []
+    if isinstance(raw_tags, list):
+        for tag in raw_tags:
+            if isinstance(tag, str) and tag.strip():
+                tags.append(tag.strip()[:80])
+            if len(tags) >= 8:
+                break
+    if not (isinstance(description, str) and description.strip()) and not tags:
+        return None
+    return {
+        "description": description.strip()[:1000] if isinstance(description, str) else "",
+        "tags": tags,
     }
 
 
@@ -972,4 +1035,166 @@ def photo_original_check(photo_id: int):
         "signature_hex": header[:16].hex(),
         "stored": False,
         "image_returned": False,
+    })
+
+
+@app.post("/api/photos/<int:photo_id>/analyze")
+def photo_analyze(photo_id: int):
+    """Stream one NAS original to the private MLX server and return suggestions only."""
+    nas = current_nas_session()
+    if not nas:
+        return jsonify({"ok": False, "error": "請先登入 Synology Photos。"}), 401
+    if not MLX_SERVER_API_KEY:
+        return jsonify({"ok": False, "error": "尚未設定本機 MLX API key。"}), 503
+
+    space = request.args.get("space", "personal")
+    cache_key = request.args.get("cache_key", "")
+    unit_id = request.args.get("unit_id", str(photo_id))
+    if space not in {"personal", "shared"}:
+        return jsonify({"ok": False, "error": "空間類型無效。"}), 400
+    if cache_key and (
+        len(cache_key) > 80
+        or "_" not in cache_key
+        or not all(part.isdigit() for part in cache_key.split("_", 1))
+    ):
+        return jsonify({"ok": False, "error": "照片識別資料格式無效。"}), 400
+    if not unit_id.isdigit():
+        return jsonify({"ok": False, "error": "照片項目識別碼格式無效。"}), 400
+
+    download_api = "SYNO.Foto.Download" if space == "personal" else "SYNO.FotoTeam.Download"
+    browse_api = "SYNO.Foto.Browse.Item" if space == "personal" else "SYNO.FotoTeam.Browse.Item"
+    try:
+        download_url, download_version = api_endpoint(nas, download_api)
+        if not cache_key:
+            browse_url, browse_version = api_endpoint(nas, browse_api)
+            item_payload = post_synology(
+                nas.client,
+                browse_url,
+                {
+                    "api": browse_api,
+                    "version": browse_version,
+                    "method": "get",
+                    "id": json.dumps([photo_id], separators=(",", ":")),
+                    "additional": json.dumps(["thumbnail"], separators=(",", ":")),
+                    "_sid": nas.sid,
+                },
+            )
+            item_data = item_payload.get("data")
+            items = item_data.get("list") if isinstance(item_data, dict) else None
+            item = items[0] if isinstance(items, list) and items and isinstance(items[0], dict) else {}
+            additional = item.get("additional") if isinstance(item.get("additional"), dict) else {}
+            thumbnail = additional.get("thumbnail") if isinstance(additional.get("thumbnail"), dict) else {}
+            cache_key = thumbnail.get("cache_key", "")
+            resolved_unit_id = thumbnail.get("unit_id")
+            if isinstance(resolved_unit_id, int):
+                unit_id = str(resolved_unit_id)
+            if not cache_key:
+                return jsonify({"ok": False, "error": "Synology Photos 尚未提供這張照片的原檔識別資料。"}), 404
+    except SynologyApiError as exc:
+        status = 502 if exc.error_code is None else 403
+        return jsonify({"ok": False, "error": str(exc), "error_code": exc.error_code}), status
+
+    nas_response = None
+    image_buffer = bytearray()
+    upstream_type = ""
+    try:
+        nas_response = nas.client.get(
+            download_url,
+            params={
+                "api": download_api,
+                "version": download_version,
+                "method": "download",
+                "cache_key": cache_key,
+                "unit_id": json.dumps([int(unit_id)], separators=(",", ":")),
+                "_sid": nas.sid,
+            },
+            stream=True,
+            timeout=(4, 60),
+        )
+        nas_response.raise_for_status()
+        upstream_type = nas_response.headers.get("Content-Type", "").split(";", 1)[0].lower()
+        content_length = nas_response.headers.get("Content-Length")
+        if content_length and content_length.isdigit() and int(content_length) > MAX_PHOTO_ANALYSIS_BYTES:
+            return jsonify({"ok": False, "error": "原始照片超過 30 MiB 分析上限。"}), 413
+        if "json" in upstream_type or "text/plain" in upstream_type:
+            try:
+                payload = nas_response.json()
+            except ValueError:
+                payload = None
+            if isinstance(payload, dict) and not payload.get("success", True):
+                return jsonify({"ok": False, "error": "Synology Photos 拒絕原檔讀取。", "error_code": api_error(payload)}), 502
+        for chunk in nas_response.iter_content(chunk_size=256 * 1024):
+            if not chunk:
+                continue
+            if len(image_buffer) + len(chunk) > MAX_PHOTO_ANALYSIS_BYTES:
+                return jsonify({"ok": False, "error": "原始照片超過 30 MiB 分析上限。"}), 413
+            image_buffer.extend(chunk)
+    except requests.exceptions.SSLError:
+        return jsonify({"ok": False, "error": "NAS TLS 憑證驗證失敗。"}), 502
+    except requests.exceptions.Timeout:
+        return jsonify({"ok": False, "error": "讀取原檔逾時。"}), 504
+    except requests.exceptions.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else "未知"
+        return jsonify({"ok": False, "error": f"NAS 回傳 HTTP {status}。"}), 502
+    except requests.exceptions.RequestException:
+        return jsonify({"ok": False, "error": "無法讀取照片原檔。"}), 502
+    finally:
+        if nas_response is not None:
+            nas_response.close()
+
+    image_bytes = bytes(image_buffer)
+    image_type = detect_photo_format(image_bytes)
+    if not image_bytes or image_type is None:
+        return jsonify({
+            "ok": False,
+            "error": "Photos API 回傳的原檔格式不支援；目前支援 JPEG、PNG、WebP 與 HEIC/HEIF。",
+            "content_type": upstream_type or None,
+        }), 415
+
+    image_format, mime_type, extension = image_type
+    try:
+        mlx_response = requests.post(
+            f"{MLX_SERVER_URL}/photo-analyze",
+            headers={"X-API-Key": MLX_SERVER_API_KEY, "X-App-Name": "Synology-Photo-Tagger"},
+            data={"prompt": PHOTO_ANALYSIS_PROMPT, "model": MLX_MODEL},
+            files={"file": (f"photo-{photo_id}.{extension}", io.BytesIO(image_bytes), mime_type)},
+            timeout=(8, MLX_TIMEOUT_SECONDS),
+            allow_redirects=False,
+        )
+        mlx_response.raise_for_status()
+        result = mlx_response.json()
+    except requests.exceptions.Timeout:
+        return jsonify({"ok": False, "error": "本機 MLX 分析逾時，請稍後重試。"}), 504
+    except requests.exceptions.HTTPError as exc:
+        response = exc.response
+        try:
+            error_payload = response.json() if response is not None else {}
+        except ValueError:
+            error_payload = {}
+        message = error_payload.get("error") if isinstance(error_payload, dict) else None
+        status = response.status_code if response is not None else 502
+        if status not in {400, 401, 413, 415, 503, 504}:
+            status = 502
+        return jsonify({"ok": False, "error": message or "本機 MLX 分析服務回報錯誤。"}), status
+    except requests.exceptions.RequestException:
+        return jsonify({"ok": False, "error": "無法連線 Mac-mini 本機 MLX 分析服務。"}), 502
+    except ValueError:
+        return jsonify({"ok": False, "error": "MLX 分析服務回傳格式無效。"}), 502
+
+    output = result.get("output") if isinstance(result, dict) else None
+    if not isinstance(output, str) or not output.strip():
+        return jsonify({"ok": False, "error": "MLX 分析服務沒有回傳分析內容。"}), 502
+    return jsonify({
+        "ok": True,
+        "photo_id": photo_id,
+        "space": space,
+        "format": image_format,
+        "bytes_sent": len(image_bytes),
+        "analysis": parse_photo_analysis(output),
+        "output": output,
+        "model": result.get("model"),
+        "converted": bool(result.get("converted")),
+        "elapsed_s": result.get("elapsed_s"),
+        "saved": False,
+        "written_to_photos": False,
     })

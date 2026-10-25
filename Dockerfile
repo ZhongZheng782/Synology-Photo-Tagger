@@ -1,9 +1,9 @@
 FROM python:3.11-slim
 
-ARG APP_VERSION=v0.1
+ARG APP_VERSION=v0.2
 LABEL org.opencontainers.image.title="Synology Photo Tagger" \
       org.opencontainers.image.version="${APP_VERSION}" \
-      org.opencontainers.image.description="Read-only Synology Photos browser with thumbnail previews and on-demand photo metadata."
+      org.opencontainers.image.description="Synology Photos browser with read-only local MLX photo analysis suggestions."
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends bash openssh-server \
