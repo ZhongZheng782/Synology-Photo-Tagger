@@ -272,7 +272,7 @@
 
 ## Docker 開發版
 
-目前待發佈版本為 **v0.2**。Docker Hub 發佈完成後提供 `v0.2` 固定版本標籤與 `latest` 標籤；NAS Compose 預設固定使用 `v0.2`。Docker Hub Repository overview 的同步稿位於 [`DOCKERHUB.md`](DOCKERHUB.md)。
+目前 Docker Hub 發佈版本為 **v0.2**，提供 `v0.2` 固定版本標籤與 `latest` 標籤；NAS Compose 預設固定使用 `v0.2`。Docker Hub Repository overview 的同步稿位於 [`DOCKERHUB.md`](DOCKERHUB.md)。
 
 此版本提供繁體中文 Web 首頁、唯讀 Photos API 瀏覽與單張照片 AI 分析預覽。使用者可在 UI 輸入 NAS 帳密（支援選填 OTP），登入後切換個人空間／共享空間，以分頁方式查看照片 ID、檔名、拍攝時間、地點及既有標籤；縮圖由本站代理顯示，metadata 按需從 Photos API 取得。候選清單可依日本地點與既有標籤篩選。登入工作階段和篩選索引只保存在服務程序記憶體中。
 
