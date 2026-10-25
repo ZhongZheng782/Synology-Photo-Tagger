@@ -418,7 +418,17 @@
                 if (photo.thumbnail_cache_key) params.set('cache_key', photo.thumbnail_cache_key);
                 if (photo.thumbnail_unit_id) params.set('unit_id', photo.thumbnail_unit_id);
                 const response = await fetch(`/api/photos/${encodeURIComponent(photo.id)}/analyze?${params}`, { method: 'POST' });
-                const result = await response.json();
+                const responseText = await response.text();
+                let result;
+                try {
+                  result = JSON.parse(responseText);
+                } catch {
+                  const contentType = response.headers.get('content-type') || '';
+                  const responseKind = contentType.includes('text/html') || /^\s*<!doctype html/i.test(responseText)
+                    ? 'HTML 錯誤頁'
+                    : '非 JSON 回應';
+                  throw new Error(`分析服務回傳${responseKind}（HTTP ${response.status}）。請重新登入後再試；若仍發生，請提供這個 HTTP 狀態。`);
+                }
                 if (!result.ok) throw new Error(result.error || '照片分析失敗。');
 
                 analysisResult.replaceChildren();

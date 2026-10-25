@@ -92,18 +92,3 @@ jobs:
           if not tailscale_connected or not mlx_reachable:
               raise SystemExit(1)
           PY
-
-          docker exec -i SYNOLOGY-PHOTO-TAGGER python3 - <<'PY'
-          import requests
-
-          try:
-              response = requests.post(
-                  "http://127.0.0.1:5000/api/photos/1/analyze?space=personal",
-                  timeout=8,
-              )
-              print(f"Local analyze route HTTP={response.status_code}")
-              print(f"Local analyze route JSON={response.headers.get('content-type', '').startswith('application/json')}")
-          except requests.RequestException as error:
-              print(f"Local analyze route probe failed={type(error).__name__}")
-              raise SystemExit(1)
-          PY

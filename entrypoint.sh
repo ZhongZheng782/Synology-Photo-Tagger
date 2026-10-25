@@ -60,4 +60,4 @@ if [ "${DEBUG_SHELL:-false}" = "true" ]; then
     /usr/sbin/sshd
 fi
 
-exec gunicorn --bind "0.0.0.0:${PORT:-5000}" --workers 1 --timeout "${GUNICORN_TIMEOUT:-1020}" app:app
+exec gunicorn --bind "0.0.0.0:${PORT:-5000}" --workers 1 --threads "${GUNICORN_THREADS:-4}" --timeout "${GUNICORN_TIMEOUT:-1020}" app:app
