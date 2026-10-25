@@ -17,10 +17,22 @@ jobs:
           set -euo pipefail
           docker exec -i SYNOLOGY-PHOTO-TAGGER python3 - <<'PY'
           import os
+import json
           import subprocess
           import requests
 
           socket_path = "/var/run/tailscale/tailscaled.sock"
+state_result = subprocess.run(
+    ["tailscale", f"--socket={socket_path}", "status", "--json"],
+    capture_output=True,
+    text=True,
+    timeout=10,
+)
+try:
+    backend_state = json.loads(state_result.stdout).get("BackendState", "unknown")
+except (ValueError, AttributeError):
+    backend_state = "unavailable"
+print(f"Tailscale backend state={backend_state}")
           status = subprocess.run(
               ["tailscale", f"--socket={socket_path}", "ip", "-4"],
               capture_output=True,
