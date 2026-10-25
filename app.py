@@ -30,10 +30,11 @@ API_INFO_PARAMS = {
 API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.2")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.3")
 MLX_SERVER_URL = os.environ.get(
     "MLX_SERVER_URL", "http://mac-mini.tail28f10.ts.net:5001"
 ).strip().rstrip("/")
+MLX_HTTP_PROXY = os.environ.get("MLX_HTTP_PROXY", "").strip()
 MLX_SERVER_API_KEY = os.environ.get("MLX_SERVER_API_KEY", "").strip()
 MLX_MODEL = os.environ.get("MLX_MODEL", "mlx-gemma4").strip() or "mlx-gemma4"
 MLX_TIMEOUT_SECONDS = max(30, int(os.environ.get("MLX_TIMEOUT_SECONDS", "900")))
@@ -1160,6 +1161,11 @@ def photo_analyze(photo_id: int):
             files={"file": (f"photo-{photo_id}.{extension}", io.BytesIO(image_bytes), mime_type)},
             timeout=(8, MLX_TIMEOUT_SECONDS),
             allow_redirects=False,
+            proxies=(
+                {"http": MLX_HTTP_PROXY, "https": MLX_HTTP_PROXY}
+                if MLX_HTTP_PROXY
+                else None
+            ),
         )
         mlx_response.raise_for_status()
         result = mlx_response.json()
