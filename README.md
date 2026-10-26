@@ -272,11 +272,11 @@
 
 ## Docker 開發版
 
-目前程式版本目標為 **v0.3.3**，包含容器內 Tailscale userspace proxy、私有 MLX 照片分析，以及偵測掃描文件後自動呼叫 OCR 擷取細節；映像發佈後，NAS Compose 將使用 `v0.3.3` 標籤。Docker Hub Repository overview 的同步稿位於 [`DOCKERHUB.md`](DOCKERHUB.md)。
+目前程式版本目標為 **v0.3.4**，包含容器內 Tailscale userspace proxy、私有 MLX 照片分析，以及偵測掃描文件後自動呼叫 OCR 擷取細節；照片只上傳 Mac-mini 一次，視覺分析和 OCR 共用同一份暫存影像。映像發佈後，NAS Compose 將使用 `v0.3.4` 標籤。Docker Hub Repository overview 的同步稿位於 [`DOCKERHUB.md`](DOCKERHUB.md)。
 
 此版本提供繁體中文 Web 首頁、唯讀 Photos API 瀏覽與單張照片 AI 分析預覽。使用者可在 UI 輸入 NAS 帳密（支援選填 OTP），登入後切換個人空間／共享空間，以分頁方式查看照片 ID、檔名、拍攝時間、地點及既有標籤；縮圖由本站代理顯示，metadata 按需從 Photos API 取得。候選清單可依日本地點與既有標籤篩選。登入工作階段和篩選索引只保存在服務程序記憶體中。
 
-點選照片卡片的「本機 AI 分析」後，服務以 Synology Photos API 讀取單張原圖，記憶體暫存後送到 Tailscale 私有網路中的 Mac-mini MLX。若模型判斷內容為掃描文件，服務會再呼叫 `/ocr` 擷取文字與表格細節；HEIC/HEIF 會在 Mac-mini 轉成暫存 JPEG。原圖與 OCR 結果不寫入容器磁碟、Synology Photos 或照片檔案。描述、標籤與 OCR 文字僅顯示在候選清單。每張原圖限制 30 MiB；超出上限需先使用其他工作流程處理。
+點選照片卡片的「本機 AI 分析」後，服務以 Synology Photos API 讀取單張原圖，記憶體暫存後以單一 `/photo-analyze` 請求上傳到 Tailscale 私有網路中的 Mac-mini MLX。若視覺分析判斷內容為掃描文件，Mac-mini 會用同一份請求暫存影像接續 OCR，無須再從 Photo Tagger 重傳。HEIC/HEIF 會在 Mac-mini 轉成暫存 JPEG，供視覺分析和 OCR 共用。原圖與 OCR 結果不寫入容器磁碟、Synology Photos 或照片檔案。描述、標籤與 OCR 文字僅顯示在候選清單。每張原圖限制 30 MiB；超出上限需先使用其他工作流程處理。
 
 日本篩選依 `additional.address.country` 回傳值比對；沒有國家地點資料的照片不會列入結果。原圖分析只在使用者逐張點選後執行，不會自動掃描相簿。
 

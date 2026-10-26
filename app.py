@@ -30,7 +30,7 @@ API_INFO_PARAMS = {
 API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.3.3")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.3.4")
 MLX_SERVER_URL = os.environ.get(
     "MLX_SERVER_URL", "http://mac-mini.tail28f10.ts.net:5001"
 ).strip().rstrip("/")
@@ -297,21 +297,6 @@ def parse_photo_analysis(output: str) -> dict | None:
         "description": description.strip()[:1000] if isinstance(description, str) else "",
         "tags": tags,
     }
-
-
-def photo_needs_ocr(analysis: dict | None) -> bool:
-    """Return true when visual analysis identifies a document or scan."""
-    if not isinstance(analysis, dict):
-        return False
-    text = " ".join(
-        [str(analysis.get("description") or "")]
-        + [str(tag) for tag in analysis.get("tags", []) if isinstance(tag, str)]
-    ).casefold()
-    document_hints = (
-        "文件", "掃描", "表格", "收據", "發票", "單據", "合約", "表單", "報告",
-        "document", "scan", "receipt", "invoice", "form", "table",
-    )
-    return any(hint in text for hint in document_hints)
 
 
 def is_japan(photo: dict) -> bool:
@@ -1173,7 +1158,7 @@ def photo_analyze(photo_id: int):
         mlx_response = requests.post(
             f"{MLX_SERVER_URL}/photo-analyze",
             headers={"X-API-Key": MLX_SERVER_API_KEY, "X-App-Name": "Synology-Photo-Tagger"},
-            data={"prompt": PHOTO_ANALYSIS_PROMPT, "model": MLX_MODEL},
+            data={"prompt": PHOTO_ANALYSIS_PROMPT, "model": MLX_MODEL, "ocr_engine": MLX_OCR_ENGINE},
             files={"file": (f"photo-{photo_id}.{extension}", io.BytesIO(image_bytes), mime_type)},
             timeout=(8, MLX_TIMEOUT_SECONDS),
             allow_redirects=False,
@@ -1208,40 +1193,9 @@ def photo_analyze(photo_id: int):
         return jsonify({"ok": False, "error": "MLX 分析服務沒有回傳分析內容。"}), 502
     analysis = parse_photo_analysis(output)
     ocr_result = None
-    if photo_needs_ocr(analysis):
-        try:
-            ocr_response = requests.post(
-                f"{MLX_SERVER_URL}/ocr",
-                headers={"X-API-Key": MLX_SERVER_API_KEY, "X-App-Name": "Synology-Photo-Tagger"},
-                data={"engine": MLX_OCR_ENGINE, "dpi": "200"},
-                files={"file": (f"photo-{photo_id}.{extension}", io.BytesIO(image_bytes), mime_type)},
-                timeout=(8, MLX_TIMEOUT_SECONDS),
-                allow_redirects=False,
-                proxies=(
-                    {"http": MLX_HTTP_PROXY, "https": MLX_HTTP_PROXY}
-                    if MLX_HTTP_PROXY
-                    else None
-                ),
-            )
-            ocr_response.raise_for_status()
-            ocr_payload = ocr_response.json()
-            ocr_text = ocr_payload.get("markdown") if isinstance(ocr_payload, dict) else None
-            if isinstance(ocr_text, str) and ocr_text.strip():
-                timings = ocr_payload.get("timings") if isinstance(ocr_payload.get("timings"), dict) else {}
-                ocr_result = {
-                    "engine": ocr_payload.get("engine") or MLX_OCR_ENGINE,
-                    "text": ocr_text.strip(),
-                    "elapsed_s": timings.get("request_total_s"),
-                }
-            else:
-                ocr_result = {"error": "OCR 沒有擷取到文字。"}
-        except requests.exceptions.Timeout:
-            ocr_result = {"error": "OCR 文字擷取逾時；視覺分析建議仍可使用。"}
-        except requests.exceptions.HTTPError as exc:
-            status = exc.response.status_code if exc.response is not None else "未知"
-            ocr_result = {"error": f"OCR 服務回應 HTTP {status}；視覺分析建議仍可使用。"}
-        except (requests.exceptions.RequestException, ValueError):
-            ocr_result = {"error": "無法取得 OCR 文字；視覺分析建議仍可使用。"}
+    api_ocr = result.get("ocr") if isinstance(result, dict) else None
+    if isinstance(api_ocr, dict):
+        ocr_result = api_ocr
     return jsonify({
         "ok": True,
         "photo_id": photo_id,
