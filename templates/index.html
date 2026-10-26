@@ -412,7 +412,7 @@
               analyzeButton.textContent = '正在分析…';
               analysisResult.hidden = false;
               analysisResult.classList.remove('error-text');
-              analysisResult.textContent = '正在透過 Photos API 讀取原圖並送往 Mac-mini…';
+              analysisResult.textContent = '正在透過 Photos API 讀取原圖並送往 Mac-mini；若辨識為掃描文件，會接續擷取 OCR 文字…';
               try {
                 const params = new URLSearchParams({ space: data.space });
                 if (photo.thumbnail_cache_key) params.set('cache_key', photo.thumbnail_cache_key);
@@ -451,6 +451,22 @@
                     tags.append(chip);
                   }
                   analysisResult.append(tags);
+                }
+                if (result.ocr?.text) {
+                  const ocrDetails = document.createElement('details');
+                  ocrDetails.className = 'analysis-ocr';
+                  ocrDetails.open = true;
+                  const ocrHeading = document.createElement('summary');
+                  ocrHeading.textContent = `OCR 文字細節 · ${result.ocr.engine || 'OCR'}${result.ocr.elapsed_s ? ` · ${Number(result.ocr.elapsed_s).toFixed(1)} 秒` : ''}`;
+                  const ocrText = document.createElement('pre');
+                  ocrText.textContent = result.ocr.text;
+                  ocrDetails.append(ocrHeading, ocrText);
+                  analysisResult.append(ocrDetails);
+                } else if (result.ocr?.error) {
+                  const ocrError = document.createElement('p');
+                  ocrError.className = 'analysis-ocr-error';
+                  ocrError.textContent = result.ocr.error;
+                  analysisResult.append(ocrError);
                 }
                 if (!result.analysis) {
                   const raw = document.createElement('pre');
