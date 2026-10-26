@@ -31,7 +31,7 @@ API_INFO_PARAMS = {
 API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.3.10")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.3.11")
 MLX_SERVER_URL = os.environ.get(
     "MLX_SERVER_URL", "http://mac-mini.tail28f10.ts.net:5001"
 ).strip().rstrip("/")
@@ -853,33 +853,91 @@ def list_photo_tags():
     token = session.get("nas_session_token")
     if not token:
         return jsonify({"ok": False, "error": "登入工作階段已失效，請重新登入。"}), 401
-    api_name = "SYNO.Foto.Browse.Item" if space == "personal" else "SYNO.FotoTeam.Browse.Item"
+    try:
+        offset = max(0, int(request.args.get("offset", "0")))
+        limit = min(1000, max(1, int(request.args.get("limit", "500"))))
+    except ValueError:
+        return jsonify({"ok": False, "error": "標籤頁碼或筆數格式錯誤。"}), 400
+    api_name = "SYNO.Foto.Browse.GeneralTag" if space == "personal" else "SYNO.FotoTeam.Browse.GeneralTag"
     try:
         url, version = api_endpoint(nas, api_name)
-        index = photo_library_index(token, space)
-        scan_photo_library_page(nas, api_name, url, version, index)
-        tags = sorted(
+        payload = post_synology(
+            nas.client,
+            url,
             {
-                str(tag).strip()
-                for photo in index.photos
-                for tag in photo.get("tags", [])
-                if str(tag).strip()
+                "api": api_name,
+                "version": version,
+                "method": "list",
+                "offset": offset,
+                "limit": limit,
+                "_sid": nas.sid,
             },
-            key=str.casefold,
+        )
+        data = payload.get("data")
+        rows = data.get("list") if isinstance(data, dict) else None
+        if not isinstance(rows, list):
+            raise SynologyApiError("Synology Photos 沒有回傳標籤清單。")
+        tags = []
+        for row in rows:
+            if not isinstance(row, dict) or not isinstance(row.get("name"), str) or not row["name"].strip():
+                continue
+            item_count = row.get("item_count", row.get("items", row.get("count")))
+            tags.append({
+                "id": row.get("id"),
+                "name": row["name"].strip(),
+                "count": item_count if isinstance(item_count, int) and item_count >= 0 else None,
+            })
+        tags.sort(key=lambda tag: tag["name"].casefold())
+        total = data.get("total", data.get("count")) if isinstance(data, dict) else None
+        next_offset = offset + len(rows)
+        complete = (
+            next_offset >= total if isinstance(total, int) and total >= 0
+            else len(rows) < limit
         )
         return jsonify(
             {
                 "ok": True,
                 "space": space,
                 "tags": tags,
-                "scanning": not index.complete,
-                "scanned_count": index.source_offset,
-                "complete": index.complete,
+                "total_tags": total if isinstance(total, int) else None,
+                "next_offset": next_offset,
+                "scanning": False,
+                "scanned_count": next_offset,
+                "complete": complete,
             }
         )
     except SynologyApiError as exc:
-        status = 502 if exc.error_code is None else 403
-        return jsonify({"ok": False, "error": str(exc), "error_code": exc.error_code}), status
+        # Keep the previous photo scan as a compatibility fallback for DSM builds
+        # that do not expose GeneralTag.list in the discovered API catalog.
+        try:
+            item_api = "SYNO.Foto.Browse.Item" if space == "personal" else "SYNO.FotoTeam.Browse.Item"
+            item_url, item_version = api_endpoint(nas, item_api)
+            index = photo_library_index(token, space)
+            scan_photo_library_page(nas, item_api, item_url, item_version, index)
+            counts: dict[str, int] = {}
+            for photo in index.photos:
+                for name in photo.get("tags", []):
+                    clean_name = str(name).strip()
+                    if clean_name:
+                        counts[clean_name] = counts.get(clean_name, 0) + 1
+            all_tags = sorted(counts.items(), key=lambda item: item[0].casefold())
+            page = all_tags[offset:offset + limit]
+            next_offset = offset + len(page)
+            complete = index.complete and next_offset >= len(all_tags)
+            return jsonify({
+                "ok": True,
+                "space": space,
+                "tags": [{"name": name, "count": count, "id": None} for name, count in page],
+                "total_tags": len(all_tags) if index.complete else None,
+                "next_offset": next_offset,
+                "scanning": not index.complete,
+                "scanned_count": index.source_offset,
+                "complete": complete,
+                "source": "photo-scan-fallback",
+            })
+        except SynologyApiError as fallback_exc:
+            status = 502 if fallback_exc.error_code is None else 403
+            return jsonify({"ok": False, "error": str(fallback_exc), "error_code": fallback_exc.error_code}), status
 
 
 @app.get("/api/photos/<int:photo_id>/metadata")

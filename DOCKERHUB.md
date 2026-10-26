@@ -1,4 +1,4 @@
-# Synology Photo Tagger v0.3.10
+# Synology Photo Tagger v0.3.11
 
 A lightweight Python web app for browsing a Synology Photos library and inspecting photo metadata before building an AI tagging workflow.
 
@@ -14,7 +14,7 @@ A lightweight Python web app for browsing a Synology Photos library and inspecti
 - Analyzes one selected photo through a private MLX server and displays Traditional Chinese description and tag suggestions. Analysis is opt-in per photo and does not write to Synology Photos.
 - Keeps the NAS session on the server and serves the original photo folder as a read-only mount.
 
-This v0.3.10 release remains read-only: it does not write tags or descriptions. For an explicitly selected photo, the app retrieves the original and person/location metadata through the Synology Photos API. Analysis requests fetch the same metadata as the photo details panel. Confirmed Synology Photos names and GPS-derived place names are supplied as context for the AI description; Photo Tagger does not infer which face corresponds to each name or identify a landmark from coordinates alone. The app holds the original in memory and uploads it once to the private MLX server for visual suggestions; if those identify a scanned document, the server runs OCR asynchronously using the same request-scoped image file. Original retrieval and analysis run in a background job, while the browser polls short status requests to avoid gateway timeouts. The UI distinguishes queued OCR (waiting) from active OCR (processing) and shows elapsed time. Neither the original nor OCR output is saved by Photo Tagger. Tailscale userspace networking provides an HTTP proxy for MLX requests without granting the container network administration capabilities. The web server uses threads so long analysis requests do not block other UI requests. Synology Photos API behavior can vary by DSM and Photos version.
+This v0.3.11 release remains read-only: it does not write tags or descriptions. It includes an inventory of existing Synology Photos tags and their item counts to support a future controlled vocabulary. For an explicitly selected photo, the app retrieves the original and person/location metadata through the Synology Photos API. Analysis requests fetch the same metadata as the photo details panel. Confirmed Synology Photos names and GPS-derived place names are supplied as context for the AI description; Photo Tagger does not infer which face corresponds to each name or identify a landmark from coordinates alone. The app holds the original in memory and uploads it once to the private MLX server for visual suggestions; if those identify a scanned document, the server runs OCR asynchronously using the same request-scoped image file. Original retrieval and analysis run in a background job, while the browser polls short status requests to avoid gateway timeouts. The UI distinguishes queued OCR (waiting) from active OCR (processing) and shows elapsed time. Neither the original nor OCR output is saved by Photo Tagger. Tailscale userspace networking provides an HTTP proxy for MLX requests without granting the container network administration capabilities. The web server uses threads so long analysis requests do not block other UI requests. Synology Photos API behavior can vary by DSM and Photos version.
 
 ## Quick start
 
@@ -26,12 +26,12 @@ docker compose up -d
 
 Open `http://localhost:5056/`. Set `SYNOLOGY_URL` to the DSM address reachable from the container. Sign in through the web UI with a Synology account that can access Photos.
 
-The provided Compose file uses the `v0.3.10` image tag. Set `MLX_SERVER_URL`, `MLX_SERVER_API_KEY`, and a dedicated Tailscale `TAILSCALE_AUTHKEY` in `.env` to enable analysis. `MLX_OCR_ENGINE` selects `baidu` (default) or `glm` for document OCR. Tailscale node state persists in a Docker named volume. To run the latest published build instead, change the image tag to `latest`.
+The provided Compose file uses the `v0.3.11` image tag. Set `MLX_SERVER_URL`, `MLX_SERVER_API_KEY`, and a dedicated Tailscale `TAILSCALE_AUTHKEY` in `.env` to enable analysis. `MLX_OCR_ENGINE` selects `baidu` (default) or `glm` for document OCR. Tailscale node state persists in a Docker named volume. To run the latest published build instead, change the image tag to `latest`.
 
 ## Image
 
 ```sh
-docker pull wenchiehlee1020/synology-photo-tagger:v0.3.10
+docker pull wenchiehlee1020/synology-photo-tagger:v0.3.11
 ```
 
 Source: [GitHub](https://github.com/ZhongZheng782/Synology-Photo-Tagger)

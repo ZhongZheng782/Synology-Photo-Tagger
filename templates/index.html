@@ -6,6 +6,7 @@
   <meta name="theme-color" content="#f4f6f2">
   <title>Synology Photo Tagger</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='tag-inventory.css') }}">
 </head>
 <body>
   <div class="app-shell">
@@ -109,6 +110,12 @@
           <label>每頁<select id="limit-select"><option>24</option><option selected>48</option><option>100</option></select></label>
           <button class="primary-button" id="load-photos" type="button">載入照片 <span class="button-arrow">→</span></button>
         </div>
+        <details class="tag-inventory" id="tag-inventory" hidden>
+          <summary>現有標籤盤點 <span id="tag-inventory-count"></span></summary>
+          <div class="tag-inventory-tools"><button class="secondary-button" id="copy-tag-inventory" type="button">複製清單</button></div>
+          <p>標籤來自目前所選 Synology Photos 空間；使用項目數可協助辨認常用詞與待整理詞彙。</p>
+          <div class="tag-inventory-list" id="tag-inventory-list"></div>
+        </details>
         <div class="photo-list" id="photo-list" aria-live="polite"><div class="photo-empty">登入後載入照片清單。</div></div>
         <div class="photo-pagination"><span id="page-label">—</span><div><button class="secondary-button" id="prev-page" type="button" disabled>上一頁</button><button class="secondary-button" id="next-page" type="button" disabled>下一頁</button></div></div>
       </section>
@@ -164,8 +171,54 @@
       select.replaceChildren();
       select.append(new Option('全部標籤', ''));
       select.append(new Option('未加標籤', '__untagged__'));
-      for (const tag of tags) select.append(new Option(tag, tag));
+      for (const tag of tags) {
+        const name = typeof tag === 'string' ? tag : tag.name;
+        const count = typeof tag === 'object' ? tag.count : null;
+        select.append(new Option(count === null || count === undefined ? name : `${name} · ${count} 張`, name));
+      }
       select.value = [...select.options].some(option => option.value === selectedValue) ? selectedValue : '';
+    }
+
+    function renderTagInventory(tags, complete) {
+      const panel = document.getElementById('tag-inventory');
+      const summaryCount = document.getElementById('tag-inventory-count');
+      const list = document.getElementById('tag-inventory-list');
+      panel.hidden = false;
+      summaryCount.textContent = complete ? `· ${tags.length} 個` : `· 已載入 ${tags.length} 個`;
+      list.replaceChildren();
+      for (const tag of tags) {
+        const row = document.createElement('div');
+        row.className = 'tag-inventory-row';
+        const name = document.createElement('span');
+        name.textContent = tag.name;
+        const count = document.createElement('small');
+        count.textContent = tag.count === null || tag.count === undefined ? '數量未知' : `${tag.count} 個項目`;
+        row.append(name, count);
+        list.append(row);
+      }
+    }
+
+    async function copyTagInventory() {
+      const tags = [...document.querySelectorAll('.tag-inventory-row')].map(row => {
+        const cells = row.querySelectorAll('span, small');
+        return `${cells[0]?.textContent || ''}\t${cells[1]?.textContent || ''}`;
+      });
+      const text = ['標籤\t使用項目數', ...tags].join('\n');
+      const button = document.getElementById('copy-tag-inventory');
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch {
+        const input = document.createElement('textarea');
+        input.value = text;
+        input.style.position = 'fixed';
+        input.style.opacity = '0';
+        document.body.append(input);
+        input.select();
+        document.execCommand('copy');
+        input.remove();
+      }
+      button.textContent = '已複製';
+      window.setTimeout(() => { button.textContent = '複製清單'; }, 1400);
     }
 
     function resetPhotoTags() {
@@ -186,21 +239,28 @@
       const button = document.getElementById('load-tags');
       if (photoTagsSpace === space && !select.disabled) return;
       const selectedValue = select.value;
-      const tags = new Set();
+      const tags = new Map();
       select.disabled = true;
       button.disabled = true;
       try {
         let complete = false;
+        let offset = 0;
         while (!complete) {
-          const params = new URLSearchParams({ space });
+          const params = new URLSearchParams({ space, offset: String(offset), limit: '500' });
           const response = await fetch(`/api/photos/tags?${params}`);
           const data = await response.json();
           if (requestId !== photoTagsRequestId || space !== document.getElementById('space-select').value) return;
           if (!data.ok) throw new Error(data.error || '標籤讀取失敗。');
-          for (const tag of data.tags || []) tags.add(tag);
-          renderPhotoTagOptions(select, [...tags].sort((a, b) => a.localeCompare(b, 'zh-Hant')), selectedValue);
+          for (const tag of data.tags || []) {
+            const name = typeof tag === 'string' ? tag : tag.name;
+            if (name) tags.set(name, typeof tag === 'string' ? {name, count: null} : tag);
+          }
+          offset = Number(data.next_offset ?? offset + (data.tags || []).length);
           complete = data.complete;
-          button.textContent = complete ? `標籤 ${tags.size} 個` : `讀取中 ${data.scanned_count} 張`;
+          const orderedTags = [...tags.values()].sort((a, b) => a.name.localeCompare(b.name, 'zh-Hant'));
+          renderPhotoTagOptions(select, orderedTags, selectedValue);
+          renderTagInventory(orderedTags, complete);
+          button.textContent = complete ? `標籤 ${tags.size} 個` : `讀取中 ${tags.size} 個`;
           if (!complete) await new Promise(resolve => window.setTimeout(resolve, 120));
         }
         photoTagsSpace = space;
@@ -694,6 +754,7 @@
 
     document.getElementById('load-photos')?.addEventListener('click', () => loadPhotos(0));
     document.getElementById('load-tags')?.addEventListener('click', loadPhotoTags);
+    document.getElementById('copy-tag-inventory')?.addEventListener('click', copyTagInventory);
     document.getElementById('tag-select')?.addEventListener('change', () => {
       if (!loginForm.hidden) return;
       loadPhotos(0);
