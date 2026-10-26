@@ -31,7 +31,7 @@ API_INFO_PARAMS = {
 API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.3.11")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.3.12")
 MLX_SERVER_URL = os.environ.get(
     "MLX_SERVER_URL", "http://mac-mini.tail28f10.ts.net:5001"
 ).strip().rstrip("/")
@@ -42,8 +42,9 @@ MLX_OCR_ENGINE = os.environ.get("MLX_OCR_ENGINE", "baidu").strip().lower() or "b
 MLX_TIMEOUT_SECONDS = max(30, int(os.environ.get("MLX_TIMEOUT_SECONDS", "900")))
 MAX_PHOTO_ANALYSIS_BYTES = 30 * 1024 * 1024
 PHOTO_ANALYSIS_PROMPT = """請用繁體中文客觀分析照片，並且只輸出一個合法 JSON 物件，不要加 Markdown 或其他文字：
-{"description":"一至兩句簡潔、只描述畫面可見事實的內容","tags":["3 至 8 個適合搜尋的短標籤"]}
-標籤只根據可見內容；若照片明確呈現購物情境才加入「購物」。不要推測人物身分、健康、年齡等敏感特徵；不確定時省略。"""
+{"description":"一至兩句簡潔、只描述畫面可見事實的內容","tags":["0 至 8 個適合搜尋的短標籤"]}
+標籤只根據可見內容；優先沿用提供的 Synology Photos 現有標籤，必須逐字使用清單中的標準寫法。只有當清單中沒有能準確描述畫面的標籤時，才提出簡潔、可重複使用的新標籤。不要為了湊數硬加標籤，也不要因標籤使用次數較多就提高其優先度。若照片明確呈現購物情境才加入「購物」。不要推測人物身分、健康、年齡等敏感特徵；不確定時省略。人物標籤只能使用本張照片 Synology Photos metadata 已確認的人名，不得自行辨認或猜測姓名。"""
+
 
 
 @dataclass
@@ -940,6 +941,45 @@ def list_photo_tags():
             return jsonify({"ok": False, "error": str(fallback_exc), "error_code": fallback_exc.error_code}), status
 
 
+def photo_tag_vocabulary(nas: NasSession, space: str) -> list[str]:
+    """Read current tag names for the signed-in user's selected Photos space."""
+    api_name = "SYNO.Foto.Browse.GeneralTag" if space == "personal" else "SYNO.FotoTeam.Browse.GeneralTag"
+    try:
+        url, version = api_endpoint(nas, api_name)
+        names: list[str] = []
+        offset = 0
+        page_size = 500
+        for _ in range(40):
+            payload = post_synology(
+                nas.client,
+                url,
+                {
+                    "api": api_name,
+                    "version": version,
+                    "method": "list",
+                    "offset": offset,
+                    "limit": page_size,
+                    "_sid": nas.sid,
+                },
+            )
+            data = payload.get("data")
+            rows = data.get("list") if isinstance(data, dict) else None
+            if not isinstance(rows, list):
+                raise SynologyApiError("Synology Photos 沒有回傳標籤清單。")
+            for row in rows:
+                name = row.get("name") if isinstance(row, dict) else None
+                if isinstance(name, str) and name.strip() and name.strip() not in names:
+                    names.append(name.strip())
+            offset += len(rows)
+            if len(rows) < page_size:
+                break
+        if names:
+            return names
+    except SynologyApiError:
+        app.logger.info("Unable to read current Synology Photos tag vocabulary; analysis will proceed without a vocabulary.")
+    return []
+
+
 @app.get("/api/photos/<int:photo_id>/metadata")
 def photo_metadata(photo_id: int):
     nas = current_nas_session()
@@ -1326,6 +1366,7 @@ def _perform_photo_analysis(photo_id: int):
     browse_api = "SYNO.Foto.Browse.Item" if space == "personal" else "SYNO.FotoTeam.Browse.Item"
     known_people: list[str] = []
     known_location: list[str] = []
+    known_tags: list[str] = []
     try:
         download_url, download_version = api_endpoint(nas, download_api)
         browse_url, browse_version = api_endpoint(nas, browse_api)
@@ -1350,6 +1391,7 @@ def _perform_photo_analysis(photo_id: int):
         additional = item.get("additional") if isinstance(item.get("additional"), dict) else {}
         metadata = item_metadata(item)
         known_people = metadata.get("people", [])
+        known_tags = photo_tag_vocabulary(nas, space)
         for key in ("country", "state", "county", "city", "district", "town", "village", "landmark", "route"):
             value = metadata.get(key)
             if isinstance(value, str) and value.strip() and value.strip() not in known_location:
@@ -1432,6 +1474,10 @@ def _perform_photo_analysis(photo_id: int):
 
     image_format, mime_type, extension = image_type
     analysis_prompt = PHOTO_ANALYSIS_PROMPT
+    if known_tags:
+        analysis_prompt += "\n目前登入者在此 Synology Photos 空間的既有標籤（只能在符合照片內容時重用，必須逐字使用）：" + "、".join(known_tags) + "。清單中的人名只可在本張照片的已確認人物清單中出現時使用。"
+    if known_people:
+        analysis_prompt += "\n本張照片已由 Synology Photos metadata 確認的人物姓名：" + "、".join(known_people) + "。人物標籤請使用上方現有清單中的完全相同名稱。"
     if known_people:
         analysis_prompt += (
             "\n已確認的人物姓名（來自 Synology Photos metadata，並非視覺推測）："
