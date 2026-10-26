@@ -427,7 +427,10 @@
                   const responseKind = contentType.includes('text/html') || /^\s*<!doctype html/i.test(responseText)
                     ? 'HTML 錯誤頁'
                     : '非 JSON 回應';
-                  throw new Error(`分析服務回傳${responseKind}（HTTP ${response.status}）。請重新登入後再試；若仍發生，請提供這個 HTTP 狀態。`);
+                  const recovery = response.status === 504
+                    ? '上游處理逾時，請稍後重試；通常不需要重新登入。'
+                    : '請重新登入後再試；若仍發生，請提供這個 HTTP 狀態。';
+                  throw new Error(`分析服務回傳${responseKind}（HTTP ${response.status}）。${recovery}`);
                 }
                 if (!result.ok) throw new Error(result.error || '照片分析失敗。');
 
@@ -452,22 +455,6 @@
                   }
                   analysisResult.append(tags);
                 }
-                if (result.ocr?.text) {
-                  const ocrDetails = document.createElement('details');
-                  ocrDetails.className = 'analysis-ocr';
-                  ocrDetails.open = true;
-                  const ocrHeading = document.createElement('summary');
-                  ocrHeading.textContent = `OCR 文字細節 · ${result.ocr.engine || 'OCR'}${result.ocr.elapsed_s ? ` · ${Number(result.ocr.elapsed_s).toFixed(1)} 秒` : ''}`;
-                  const ocrText = document.createElement('pre');
-                  ocrText.textContent = result.ocr.text;
-                  ocrDetails.append(ocrHeading, ocrText);
-                  analysisResult.append(ocrDetails);
-                } else if (result.ocr?.error) {
-                  const ocrError = document.createElement('p');
-                  ocrError.className = 'analysis-ocr-error';
-                  ocrError.textContent = result.ocr.error;
-                  analysisResult.append(ocrError);
-                }
                 if (!result.analysis) {
                   const raw = document.createElement('pre');
                   raw.className = 'analysis-raw';
@@ -478,6 +465,68 @@
                 metadata.className = 'analysis-meta';
                 metadata.textContent = `${result.format} · ${result.model || 'MLX'} · ${Number(result.elapsed_s || 0).toFixed(1)} 秒 · 原圖未保存`;
                 analysisResult.append(metadata);
+                const showOcrResult = (ocr) => {
+                  if (ocr?.text) {
+                    const ocrDetails = document.createElement('details');
+                    ocrDetails.className = 'analysis-ocr';
+                    ocrDetails.open = true;
+                    const ocrHeading = document.createElement('summary');
+                    ocrHeading.textContent = `OCR 文字細節 · ${ocr.engine || 'OCR'}${ocr.elapsed_s ? ` · ${Number(ocr.elapsed_s).toFixed(1)} 秒` : ''}`;
+                    const ocrText = document.createElement('pre');
+                    ocrText.textContent = ocr.text;
+                    ocrDetails.append(ocrHeading, ocrText);
+                    analysisResult.append(ocrDetails);
+                  } else if (ocr?.error) {
+                    const ocrError = document.createElement('p');
+                    ocrError.className = 'analysis-ocr-error';
+                    ocrError.textContent = ocr.error;
+                    analysisResult.append(ocrError);
+                  }
+                };
+                if (result.ocr?.task_id) {
+                  const ocrProgress = document.createElement('p');
+                  ocrProgress.className = 'analysis-ocr-progress';
+                  ocrProgress.textContent = '視覺分析完成；OCR 已排入背景工作…';
+                  analysisResult.append(ocrProgress);
+                  const deadline = Date.now() + 50 * 60 * 1000;
+                  let consecutiveErrors = 0;
+                  let ocrFinished = false;
+                  while (!ocrFinished && Date.now() < deadline) {
+                    await new Promise(resolve => setTimeout(resolve, 2500));
+                    try {
+                      const pollResponse = await fetch(`/api/photo-ocr/${encodeURIComponent(result.ocr.task_id)}`);
+                      const pollPayload = await pollResponse.json();
+                      if (!pollResponse.ok || !pollPayload.ok) {
+                        throw new Error(pollPayload.error || `HTTP ${pollResponse.status}`);
+                      }
+                      consecutiveErrors = 0;
+                      if (pollPayload.status === 'complete') {
+                        ocrProgress.remove();
+                        showOcrResult(pollPayload.ocr);
+                        ocrFinished = true;
+                      } else if (pollPayload.status === 'failed') {
+                        ocrProgress.remove();
+                        showOcrResult(pollPayload.ocr || { error: 'OCR 文字擷取失敗；視覺分析建議仍可使用。' });
+                        ocrFinished = true;
+                      } else {
+                        ocrProgress.textContent = pollPayload.status === 'queued'
+                          ? 'OCR 正在排隊；視覺分析建議已可查看…'
+                          : 'OCR 正在擷取文字；視覺分析建議已可查看…';
+                      }
+                    } catch (pollError) {
+                      consecutiveErrors += 1;
+                      if (consecutiveErrors >= 8) {
+                        ocrProgress.textContent = '暫時無法查詢 OCR 狀態；視覺分析建議仍可使用，請重新分析以再試一次。';
+                        ocrFinished = true;
+                      }
+                    }
+                  }
+                  if (!ocrFinished) {
+                    ocrProgress.textContent = 'OCR 等候時間較長；視覺分析建議仍可使用，請稍後重新載入照片查看。';
+                  }
+                } else {
+                  showOcrResult(result.ocr);
+                }
               } catch (error) {
                 analysisResult.textContent = error.message || '照片分析失敗。';
                 analysisResult.classList.add('error-text');

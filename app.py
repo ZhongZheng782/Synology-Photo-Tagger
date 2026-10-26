@@ -30,7 +30,7 @@ API_INFO_PARAMS = {
 API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.3.4")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.3.5")
 MLX_SERVER_URL = os.environ.get(
     "MLX_SERVER_URL", "http://mac-mini.tail28f10.ts.net:5001"
 ).strip().rstrip("/")
@@ -1211,3 +1211,41 @@ def photo_analyze(photo_id: int):
         "saved": False,
         "written_to_photos": False,
     })
+
+
+@app.get("/api/photo-ocr/<task_id>")
+def photo_ocr_status(task_id: str):
+    """Poll OCR task state without keeping the browser request open."""
+    if not current_nas_session():
+        return jsonify({"ok": False, "error": "請先登入 Synology Photos。"}), 401
+    if not MLX_SERVER_API_KEY:
+        return jsonify({"ok": False, "error": "尚未設定本機 MLX API key。"}), 503
+    if len(task_id) != 32 or any(char not in "0123456789abcdef" for char in task_id):
+        return jsonify({"ok": False, "error": "OCR 工作識別碼格式無效。"}), 400
+
+    try:
+        response = requests.get(
+            f"{MLX_SERVER_URL}/photo-analyze/ocr-status/{task_id}",
+            headers={"X-API-Key": MLX_SERVER_API_KEY},
+            timeout=(4, 12),
+            allow_redirects=False,
+            proxies=(
+                {"http": MLX_HTTP_PROXY, "https": MLX_HTTP_PROXY}
+                if MLX_HTTP_PROXY
+                else None
+            ),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict) or payload.get("status") not in {
+            "queued", "running", "complete", "failed",
+        }:
+            return jsonify({"ok": False, "error": "OCR 狀態回應格式無效。"}), 502
+        return jsonify({"ok": True, "status": payload["status"], "ocr": payload.get("ocr")})
+    except requests.exceptions.Timeout:
+        return jsonify({"ok": False, "error": "查詢 OCR 狀態逾時，請稍後重試。"}), 504
+    except requests.exceptions.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else 502
+        return jsonify({"ok": False, "error": "找不到 OCR 工作或工作已逾期。"}), status
+    except (requests.exceptions.RequestException, ValueError):
+        return jsonify({"ok": False, "error": "無法查詢 Mac-mini OCR 工作狀態。"}), 502
