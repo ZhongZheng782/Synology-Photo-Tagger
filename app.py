@@ -31,7 +31,7 @@ API_INFO_PARAMS = {
 API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.3.7")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.3.8")
 MLX_SERVER_URL = os.environ.get(
     "MLX_SERVER_URL", "http://mac-mini.tail28f10.ts.net:5001"
 ).strip().rstrip("/")
@@ -232,6 +232,24 @@ def item_metadata(item: dict) -> dict:
     gps = additional.get("gps") if isinstance(additional.get("gps"), dict) else {}
     resolution = additional.get("resolution") if isinstance(additional.get("resolution"), dict) else {}
     tags = additional.get("tag") if isinstance(additional.get("tag"), list) else []
+    people_value = additional.get("person")
+    if isinstance(people_value, list):
+        people = people_value
+    elif isinstance(people_value, dict):
+        nested_people = people_value.get("list")
+        people = nested_people if isinstance(nested_people, list) else [people_value]
+    else:
+        people = []
+    person_names = []
+    for person in people:
+        if isinstance(person, str):
+            name = person
+        elif isinstance(person, dict):
+            name = person.get("name") or person.get("person_name")
+        else:
+            name = None
+        if isinstance(name, str) and name.strip() and name.strip().lower() != "unnamed":
+            person_names.append(name.strip())
     return {
         "description": additional.get("description"),
         "camera": exif.get("camera"),
@@ -249,6 +267,7 @@ def item_metadata(item: dict) -> dict:
         "city": address.get("city"),
         "country": address.get("country"),
         "tags": [tag.get("name") for tag in tags if isinstance(tag, dict) and tag.get("name")],
+        "people": list(dict.fromkeys(person_names)),
     }
 
 
@@ -817,7 +836,7 @@ def photo_metadata(photo_id: int):
                 "method": "get",
                 "id": json.dumps([photo_id], separators=(",", ":")),
                 "additional": json.dumps(
-                    ["exif", "description", "orientation", "resolution", "gps", "address", "tag"],
+                    ["exif", "description", "orientation", "resolution", "gps", "address", "tag", "person"],
                     separators=(",", ":"),
                 ),
                 "_sid": nas.sid,
@@ -1169,33 +1188,35 @@ def _perform_photo_analysis(photo_id: int):
 
     download_api = "SYNO.Foto.Download" if space == "personal" else "SYNO.FotoTeam.Download"
     browse_api = "SYNO.Foto.Browse.Item" if space == "personal" else "SYNO.FotoTeam.Browse.Item"
+    known_people: list[str] = []
     try:
         download_url, download_version = api_endpoint(nas, download_api)
+        browse_url, browse_version = api_endpoint(nas, browse_api)
+        item_payload = post_synology(
+            nas.client,
+            browse_url,
+            {
+                "api": browse_api,
+                "version": browse_version,
+                "method": "get",
+                "id": json.dumps([photo_id], separators=(",", ":")),
+                "additional": json.dumps(["thumbnail", "person"], separators=(",", ":")),
+                "_sid": nas.sid,
+            },
+        )
+        item_data = item_payload.get("data")
+        items = item_data.get("list") if isinstance(item_data, dict) else None
+        item = items[0] if isinstance(items, list) and items and isinstance(items[0], dict) else {}
+        additional = item.get("additional") if isinstance(item.get("additional"), dict) else {}
+        known_people = item_metadata(item).get("people", [])
+        thumbnail = additional.get("thumbnail") if isinstance(additional.get("thumbnail"), dict) else {}
         if not cache_key:
-            browse_url, browse_version = api_endpoint(nas, browse_api)
-            item_payload = post_synology(
-                nas.client,
-                browse_url,
-                {
-                    "api": browse_api,
-                    "version": browse_version,
-                    "method": "get",
-                    "id": json.dumps([photo_id], separators=(",", ":")),
-                    "additional": json.dumps(["thumbnail"], separators=(",", ":")),
-                    "_sid": nas.sid,
-                },
-            )
-            item_data = item_payload.get("data")
-            items = item_data.get("list") if isinstance(item_data, dict) else None
-            item = items[0] if isinstance(items, list) and items and isinstance(items[0], dict) else {}
-            additional = item.get("additional") if isinstance(item.get("additional"), dict) else {}
-            thumbnail = additional.get("thumbnail") if isinstance(additional.get("thumbnail"), dict) else {}
             cache_key = thumbnail.get("cache_key", "")
-            resolved_unit_id = thumbnail.get("unit_id")
-            if isinstance(resolved_unit_id, int):
-                unit_id = str(resolved_unit_id)
-            if not cache_key:
-                return jsonify({"ok": False, "error": "Synology Photos 尚未提供這張照片的原檔識別資料。"}), 404
+        resolved_unit_id = thumbnail.get("unit_id")
+        if isinstance(resolved_unit_id, int):
+            unit_id = str(resolved_unit_id)
+        if not cache_key:
+            return jsonify({"ok": False, "error": "Synology Photos 尚未提供這張照片的原檔識別資料。"}), 404
     except SynologyApiError as exc:
         status = 502 if exc.error_code is None else 403
         return jsonify({"ok": False, "error": str(exc), "error_code": exc.error_code}), status
@@ -1258,11 +1279,19 @@ def _perform_photo_analysis(photo_id: int):
         }), 415
 
     image_format, mime_type, extension = image_type
+    analysis_prompt = PHOTO_ANALYSIS_PROMPT
+    if known_people:
+        analysis_prompt += (
+            "\nSynology Photos 已將這張照片標記為包含以下人物："
+            + "、".join(known_people)
+            + "。可在整體描述中使用這些已確認姓名；不可猜測各姓名分別對應哪張臉，"
+            "也不可把個別外貌或動作指派給特定姓名。"
+        )
     try:
         mlx_response = requests.post(
             f"{MLX_SERVER_URL}/photo-analyze",
             headers={"X-API-Key": MLX_SERVER_API_KEY, "X-App-Name": "Synology-Photo-Tagger"},
-            data={"prompt": PHOTO_ANALYSIS_PROMPT, "model": MLX_MODEL, "ocr_engine": MLX_OCR_ENGINE},
+            data={"prompt": analysis_prompt, "model": MLX_MODEL, "ocr_engine": MLX_OCR_ENGINE},
             files={"file": (f"photo-{photo_id}.{extension}", io.BytesIO(image_bytes), mime_type)},
             timeout=(8, MLX_TIMEOUT_SECONDS),
             allow_redirects=False,
@@ -1307,6 +1336,7 @@ def _perform_photo_analysis(photo_id: int):
         "format": image_format,
         "bytes_sent": len(image_bytes),
         "analysis": analysis,
+        "people": known_people,
         "ocr": ocr_result,
         "output": output,
         "model": result.get("model"),

@@ -325,6 +325,7 @@
                 ['orientation', '方向'], ['filesize', '檔案大小'], ['latitude', '緯度'],
                 ['longitude', '經度'], ['city', '城市'], ['country', '國家']
               ].filter(([key]) => metadata[key] !== null && metadata[key] !== undefined && metadata[key] !== '');
+              if (metadata.people?.length) rows.push(['people', 'Synology Photos 人物', metadata.people.join('、')]);
               if (metadata.filesize) {
                 const units = ['B', 'KB', 'MB', 'GB'];
                 let size = Number(metadata.filesize);
@@ -333,7 +334,7 @@
                 rows.find(([key]) => key === 'filesize')[2] = `${size.toFixed(unit ? 1 : 0)} ${units[unit]}`;
               }
               metadataPanel.replaceChildren();
-              if (!rows.length && !metadata.tags?.length) {
+              if (!rows.length && !metadata.tags?.length && !metadata.people?.length) {
                 metadataPanel.textContent = 'Synology Photos 沒有回傳其他 metadata。';
               } else {
                 const grid = document.createElement('dl');
@@ -509,7 +510,7 @@
                 }
                 const metadata = document.createElement('small');
                 metadata.className = 'analysis-meta';
-                metadata.textContent = `${result.format} · ${result.model || 'MLX'} · ${Number(result.elapsed_s || 0).toFixed(1)} 秒 · 原圖未保存`;
+                metadata.textContent = `${result.format} · ${result.model || 'MLX'} · ${Number(result.elapsed_s || 0).toFixed(1)} 秒${result.people?.length ? ` · Synology Photos 人物：${result.people.join('、')}` : ''} · 原圖未保存`;
                 analysisResult.append(metadata);
                 const showOcrResult = (ocr) => {
                   if (ocr?.text) {
