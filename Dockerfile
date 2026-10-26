@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-ARG APP_VERSION=v0.3.5
+ARG APP_VERSION=v0.3.6
 LABEL org.opencontainers.image.title="Synology Photo Tagger" \
       org.opencontainers.image.version="${APP_VERSION}" \
       org.opencontainers.image.description="Synology Photos browser with read-only private MLX photo analysis and document OCR."

@@ -434,6 +434,52 @@
                 }
                 if (!result.ok) throw new Error(result.error || '照片分析失敗。');
 
+                if (result.task_id) {
+                  const taskId = result.task_id;
+                  const progress = document.createElement('p');
+                  progress.className = 'analysis-ocr-progress';
+                  progress.textContent = '工作已排入背景；正在讀取原圖並進行視覺分析…';
+                  analysisResult.replaceChildren(progress);
+                  const deadline = Date.now() + 20 * 60 * 1000;
+                  let consecutiveErrors = 0;
+                  let completed = false;
+                  while (!completed && Date.now() < deadline) {
+                    await new Promise(resolve => setTimeout(resolve, 2000));
+                    try {
+                      const pollResponse = await fetch(`/api/photo-analysis/${encodeURIComponent(taskId)}`);
+                      const pollText = await pollResponse.text();
+                      let pollPayload;
+                      try {
+                        pollPayload = JSON.parse(pollText);
+                      } catch {
+                        throw new Error(`分析狀態查詢回傳非 JSON（HTTP ${pollResponse.status}）。`);
+                      }
+                      if (!pollResponse.ok || !pollPayload.ok) {
+                        throw new Error(pollPayload.error || `HTTP ${pollResponse.status}`);
+                      }
+                      consecutiveErrors = 0;
+                      if (pollPayload.status === 'complete') {
+                        result = pollPayload.result;
+                        completed = true;
+                      } else if (pollPayload.status === 'failed') {
+                        consecutiveErrors = 9;
+                        throw new Error(pollPayload.result?.error || '照片分析失敗。');
+                      } else {
+                        progress.textContent = pollPayload.status === 'queued'
+                          ? '分析工作正在排隊…'
+                          : '正在讀取原圖並進行視覺分析…';
+                      }
+                    } catch (pollError) {
+                      consecutiveErrors += 1;
+                      if (consecutiveErrors >= 10) throw pollError;
+                      progress.textContent = '分析服務暫時沒有回應，正在自動重試…';
+                    }
+                  }
+                  if (!completed) throw new Error('分析工作處理時間較長，請稍後重新查看。');
+                  progress.remove();
+                  if (!result?.ok) throw new Error(result?.error || '照片分析失敗。');
+                }
+
                 analysisResult.replaceChildren();
                 const heading = document.createElement('strong');
                 heading.className = 'analysis-heading';

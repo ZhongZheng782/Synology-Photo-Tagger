@@ -7,11 +7,12 @@ import os
 import secrets
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 import requests
-from flask import Flask, Response, jsonify, render_template, request, session
+from flask import Flask, Response, copy_current_request_context, jsonify, render_template, request, session
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("APP_SECRET_KEY") or secrets.token_hex(32)
@@ -30,7 +31,7 @@ API_INFO_PARAMS = {
 API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.3.5")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.3.6")
 MLX_SERVER_URL = os.environ.get(
     "MLX_SERVER_URL", "http://mac-mini.tail28f10.ts.net:5001"
 ).strip().rstrip("/")
@@ -76,6 +77,10 @@ _japan_searches: dict[tuple[str, str], JapanSearch] = {}
 _japan_searches_lock = threading.Lock()
 _photo_library_indexes: dict[tuple[str, str], PhotoLibraryIndex] = {}
 _photo_library_indexes_lock = threading.Lock()
+_photo_analysis_jobs: dict[str, dict] = {}
+_photo_analysis_jobs_lock = threading.Lock()
+PHOTO_ANALYSIS_JOB_TTL_SECONDS = 900
+PHOTO_ANALYSIS_MAX_ACTIVE_JOBS = 4
 
 
 class SynologyApiError(Exception):
@@ -1042,6 +1047,105 @@ def photo_original_check(photo_id: int):
 
 @app.post("/api/photos/<int:photo_id>/analyze")
 def photo_analyze(photo_id: int):
+    """Queue a read-only photo analysis so browser-facing requests stay short."""
+    if not current_nas_session():
+        return jsonify({"ok": False, "error": "請先登入 Synology Photos。"}), 401
+    if not MLX_SERVER_API_KEY:
+        return jsonify({"ok": False, "error": "尚未設定本機 MLX API key。"}), 503
+
+    now = time.time()
+    with _photo_analysis_jobs_lock:
+        expired_ids = [
+            task_id for task_id, task in _photo_analysis_jobs.items()
+            if task.get("finished_at") and now - task["finished_at"] > PHOTO_ANALYSIS_JOB_TTL_SECONDS
+        ]
+        for task_id in expired_ids:
+            _photo_analysis_jobs.pop(task_id, None)
+        active_count = sum(task.get("status") in {"queued", "running"} for task in _photo_analysis_jobs.values())
+        if active_count >= PHOTO_ANALYSIS_MAX_ACTIVE_JOBS:
+            return jsonify({"ok": False, "error": "目前分析工作較多，請稍後再試。"}), 503
+        task_id = uuid.uuid4().hex
+        _photo_analysis_jobs[task_id] = {"status": "queued", "created_at": now, "finished_at": None}
+
+    worker_context = copy_current_request_context(
+        lambda: _run_photo_analysis_job(task_id, photo_id)
+    )
+    try:
+        thread = threading.Thread(
+            target=worker_context,
+            name=f"photo-analysis-{task_id[:8]}",
+            daemon=True,
+        )
+        thread.start()
+    except Exception:
+        with _photo_analysis_jobs_lock:
+            _photo_analysis_jobs.pop(task_id, None)
+        app.logger.exception("Could not start photo analysis job")
+        return jsonify({"ok": False, "error": "無法啟動照片分析工作。"}), 503
+
+    return jsonify({"ok": True, "task_id": task_id, "status": "queued"}), 202
+
+
+def _run_photo_analysis_job(task_id: str, photo_id: int) -> None:
+    with _photo_analysis_jobs_lock:
+        task = _photo_analysis_jobs.get(task_id)
+        if task is not None:
+            task["status"] = "running"
+    try:
+        result = _perform_photo_analysis(photo_id)
+        status_code = 200
+        if isinstance(result, tuple):
+            response, status_code = result
+        else:
+            response = result
+        payload = response.get_json(silent=True) if isinstance(response, Response) else None
+        if not isinstance(payload, dict):
+            payload = {"ok": False, "error": "照片分析服務回傳格式無效。"}
+            status_code = 502
+        successful = 200 <= status_code < 300 and payload.get("ok") is True
+        with _photo_analysis_jobs_lock:
+            task = _photo_analysis_jobs.get(task_id)
+            if task is not None:
+                task.update({
+                    "status": "complete" if successful else "failed",
+                    "result": payload,
+                    "finished_at": time.time(),
+                })
+    except Exception:
+        app.logger.exception("Unexpected photo analysis job failure")
+        with _photo_analysis_jobs_lock:
+            task = _photo_analysis_jobs.get(task_id)
+            if task is not None:
+                task.update({
+                    "status": "failed",
+                    "result": {"ok": False, "error": "照片分析失敗。"},
+                    "finished_at": time.time(),
+                })
+
+
+@app.get("/api/photo-analysis/<task_id>")
+def photo_analysis_job_status(task_id: str):
+    """Return the result of a queued photo-analysis job."""
+    if not current_nas_session():
+        return jsonify({"ok": False, "error": "請先登入 Synology Photos。"}), 401
+    if len(task_id) != 32 or any(char not in "0123456789abcdef" for char in task_id):
+        return jsonify({"ok": False, "error": "分析工作識別碼格式無效。"}), 400
+    now = time.time()
+    with _photo_analysis_jobs_lock:
+        task = _photo_analysis_jobs.get(task_id)
+        if task and task.get("finished_at") and now - task["finished_at"] > PHOTO_ANALYSIS_JOB_TTL_SECONDS:
+            _photo_analysis_jobs.pop(task_id, None)
+            task = None
+        if task is None:
+            return jsonify({"ok": False, "error": "找不到分析工作，或工作結果已逾期。"}), 404
+        return jsonify({
+            "ok": True,
+            "status": task["status"],
+            "result": task.get("result"),
+        })
+
+
+def _perform_photo_analysis(photo_id: int):
     """Stream one NAS original to the private MLX server and return suggestions only."""
     nas = current_nas_session()
     if not nas:

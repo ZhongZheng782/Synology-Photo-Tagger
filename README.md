@@ -272,7 +272,7 @@
 
 ## Docker 開發版
 
-目前程式版本目標為 **v0.3.5**，包含容器內 Tailscale userspace proxy、私有 MLX 照片分析，以及偵測掃描文件後自動呼叫 OCR 擷取細節；照片只上傳 Mac-mini 一次，視覺分析和 OCR 共用同一份暫存影像；OCR 在背景執行，頁面輪詢短狀態請求，不必等待長時間同步回應。映像發佈後，NAS Compose 將使用 `v0.3.5` 標籤。Docker Hub Repository overview 的同步稿位於 [`DOCKERHUB.md`](DOCKERHUB.md)。
+目前程式版本為 **v0.3.6**，包含容器內 Tailscale userspace proxy、私有 MLX 照片分析，以及偵測掃描文件後自動呼叫 OCR 擷取細節；原圖只上傳 Mac-mini 一次，視覺分析和 OCR 共用同一份暫存影像。照片讀取與 AI 分析在背景執行，頁面以短請求輪詢結果，避免上游閘道因長時間同步等待而回傳 504。映像發佈後，NAS Compose 將使用 `v0.3.6` 標籤。Docker Hub Repository overview 的同步稿位於 [`DOCKERHUB.md`](DOCKERHUB.md)。
 
 此版本提供繁體中文 Web 首頁、唯讀 Photos API 瀏覽與單張照片 AI 分析預覽。使用者可在 UI 輸入 NAS 帳密（支援選填 OTP），登入後切換個人空間／共享空間，以分頁方式查看照片 ID、檔名、拍攝時間、地點及既有標籤；縮圖由本站代理顯示，metadata 按需從 Photos API 取得。候選清單可依日本地點與既有標籤篩選。登入工作階段和篩選索引只保存在服務程序記憶體中。
 
