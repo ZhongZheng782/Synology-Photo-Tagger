@@ -532,11 +532,17 @@
                 if (result.ocr?.task_id) {
                   const ocrProgress = document.createElement('p');
                   ocrProgress.className = 'analysis-ocr-progress';
-                  ocrProgress.textContent = '視覺分析完成；OCR 已排入背景工作…';
+                  ocrProgress.textContent = 'OCR 狀態：等待中（準備排隊）；視覺分析建議已可查看…';
                   analysisResult.append(ocrProgress);
-                  const deadline = Date.now() + 50 * 60 * 1000;
+                  const ocrStartedAt = Date.now();
+                  const deadline = ocrStartedAt + 50 * 60 * 1000;
+                  const elapsedLabel = () => {
+                    const seconds = Math.floor((Date.now() - ocrStartedAt) / 1000);
+                    return seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分鐘`;
+                  };
                   let consecutiveErrors = 0;
                   let ocrFinished = false;
+                  let lastOcrStatus = 'queued';
                   while (!ocrFinished && Date.now() < deadline) {
                     await new Promise(resolve => setTimeout(resolve, 2500));
                     try {
@@ -546,6 +552,7 @@
                         throw new Error(pollPayload.error || `HTTP ${pollResponse.status}`);
                       }
                       consecutiveErrors = 0;
+                      lastOcrStatus = pollPayload.status;
                       if (pollPayload.status === 'complete') {
                         ocrProgress.remove();
                         showOcrResult(pollPayload.ocr);
@@ -556,8 +563,8 @@
                         ocrFinished = true;
                       } else {
                         ocrProgress.textContent = pollPayload.status === 'queued'
-                          ? 'OCR 正在排隊；視覺分析建議已可查看…'
-                          : 'OCR 正在擷取文字；視覺分析建議已可查看…';
+                          ? `OCR 狀態：等待中（已等候 ${elapsedLabel()}）；視覺分析建議已可查看…`
+                          : `OCR 狀態：處理中（已經過 ${elapsedLabel()}）；視覺分析建議已可查看…`;
                       }
                     } catch (pollError) {
                       consecutiveErrors += 1;
@@ -568,7 +575,7 @@
                     }
                   }
                   if (!ocrFinished) {
-                    ocrProgress.textContent = 'OCR 等候時間較長；視覺分析建議仍可使用，請稍後重新載入照片查看。';
+                    ocrProgress.textContent = `OCR 狀態：${lastOcrStatus === 'running' ? '處理中' : '等待中'}（已超過 50 分鐘）；視覺分析建議仍可查看，請稍後再確認。`;
                   }
                 } else {
                   showOcrResult(result.ocr);
