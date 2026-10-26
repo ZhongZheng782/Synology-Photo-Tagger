@@ -31,7 +31,7 @@ API_INFO_PARAMS = {
 API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.3.9")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.3.10")
 MLX_SERVER_URL = os.environ.get(
     "MLX_SERVER_URL", "http://mac-mini.tail28f10.ts.net:5001"
 ).strip().rstrip("/")
@@ -77,6 +77,8 @@ _japan_searches: dict[tuple[str, str], JapanSearch] = {}
 _japan_searches_lock = threading.Lock()
 _photo_library_indexes: dict[tuple[str, str], PhotoLibraryIndex] = {}
 _photo_library_indexes_lock = threading.Lock()
+_photo_place_indexes: dict[tuple[str, str], tuple[float, dict[str, list[str]]]] = {}
+_photo_place_indexes_lock = threading.Lock()
 _photo_analysis_jobs: dict[str, dict] = {}
 _photo_analysis_jobs_lock = threading.Lock()
 PHOTO_ANALYSIS_JOB_TTL_SECONDS = 900
@@ -266,9 +268,74 @@ def item_metadata(item: dict) -> dict:
         "longitude": gps.get("longitude"),
         "city": address.get("city"),
         "country": address.get("country"),
+        "state": address.get("state"),
+        "county": address.get("county"),
+        "district": address.get("district"),
+        "town": address.get("town"),
+        "village": address.get("village"),
+        "route": address.get("route"),
+        "landmark": address.get("landmark"),
+        "geocoding_id": additional.get("geocoding_id"),
         "tags": [tag.get("name") for tag in tags if isinstance(tag, dict) and tag.get("name")],
         "people": list(dict.fromkeys(person_names)),
     }
+
+
+def resolve_photo_place(nas: NasSession, space: str, geocoding_id: object) -> list[str]:
+    """Resolve a Photos place ID to Synology's stored human-readable place labels."""
+    if geocoding_id is None or str(geocoding_id).strip() == "":
+        return []
+    api_name = "SYNO.Foto.Browse.Geocoding" if space == "personal" else "SYNO.FotoTeam.Browse.Geocoding"
+    url, version = api_endpoint(nas, api_name)
+    cache_key = (nas.sid, space)
+    now = time.monotonic()
+    with _photo_place_indexes_lock:
+        expired = [key for key, (cached_at, _) in _photo_place_indexes.items() if now - cached_at > SESSION_TTL_SECONDS]
+        for key in expired:
+            _photo_place_indexes.pop(key, None)
+        cached = _photo_place_indexes.get(cache_key)
+    if cached:
+        return cached[1].get(str(geocoding_id), [])
+
+    place_index: dict[str, list[str]] = {}
+    offset = 0
+    page_size = 1000
+    for _ in range(20):
+        payload = post_synology(
+            nas.client,
+            url,
+            {
+                "api": api_name,
+                "version": version,
+                "method": "list",
+                "offset": offset,
+                "limit": page_size,
+                "_sid": nas.sid,
+            },
+        )
+        data = payload.get("data")
+        places = data.get("list") if isinstance(data, dict) else None
+        if not isinstance(places, list):
+            break
+        for place in places:
+            if not isinstance(place, dict):
+                continue
+            place_id = place.get("id", place.get("geocoding_id"))
+            if place_id is None:
+                continue
+            labels = []
+            for key in ("country", "first_level", "second_level", "name"):
+                value = place.get(key)
+                if isinstance(value, str) and value.strip() and value.strip() not in labels:
+                    labels.append(value.strip())
+            place_index[str(place_id)] = labels
+        offset += len(places)
+        if len(places) < page_size:
+            break
+    with _photo_place_indexes_lock:
+        _photo_place_indexes[cache_key] = (time.monotonic(), place_index)
+    target = str(geocoding_id)
+    return place_index.get(target, [])
 
 
 def detect_photo_format(image: bytes) -> tuple[str, str, str] | None:
@@ -836,7 +903,7 @@ def photo_metadata(photo_id: int):
                 "method": "get",
                 "id": json.dumps([photo_id], separators=(",", ":")),
                 "additional": json.dumps(
-                    ["exif", "description", "orientation", "resolution", "gps", "address", "tag", "person"],
+                    ["exif", "description", "orientation", "resolution", "gps", "address", "geocoding_id", "tag", "person"],
                     separators=(",", ":"),
                 ),
                 "_sid": nas.sid,
@@ -847,7 +914,18 @@ def photo_metadata(photo_id: int):
         if not isinstance(items, list) or not items or not isinstance(items[0], dict):
             return jsonify({"ok": False, "error": "Photos API 沒有回傳這張照片的詳細資料。"}), 404
         item = items[0]
-        return jsonify({"ok": True, "photo_id": photo_id, "metadata": item_metadata(item)})
+        metadata = item_metadata(item)
+        location = [
+            str(metadata.get(key)).strip()
+            for key in ("country", "state", "county", "city", "district", "town", "village", "landmark", "route")
+            if isinstance(metadata.get(key), str) and metadata.get(key).strip()
+        ]
+        try:
+            place_labels = resolve_photo_place(nas, space, metadata.get("geocoding_id"))
+        except SynologyApiError:
+            place_labels = []
+        metadata["location"] = list(dict.fromkeys(location + place_labels))
+        return jsonify({"ok": True, "photo_id": photo_id, "metadata": metadata})
     except SynologyApiError as exc:
         status = 502 if exc.error_code is None else 403
         return jsonify({"ok": False, "error": str(exc), "error_code": exc.error_code}), status
@@ -1189,6 +1267,7 @@ def _perform_photo_analysis(photo_id: int):
     download_api = "SYNO.Foto.Download" if space == "personal" else "SYNO.FotoTeam.Download"
     browse_api = "SYNO.Foto.Browse.Item" if space == "personal" else "SYNO.FotoTeam.Browse.Item"
     known_people: list[str] = []
+    known_location: list[str] = []
     try:
         download_url, download_version = api_endpoint(nas, download_api)
         browse_url, browse_version = api_endpoint(nas, browse_api)
@@ -1201,7 +1280,7 @@ def _perform_photo_analysis(photo_id: int):
                 "method": "get",
                 "id": json.dumps([photo_id], separators=(",", ":")),
                 "additional": json.dumps(
-                    ["exif", "description", "orientation", "resolution", "gps", "address", "tag", "person", "thumbnail"],
+                    ["exif", "description", "orientation", "resolution", "gps", "address", "geocoding_id", "tag", "person", "thumbnail"],
                     separators=(",", ":"),
                 ),
                 "_sid": nas.sid,
@@ -1211,7 +1290,19 @@ def _perform_photo_analysis(photo_id: int):
         items = item_data.get("list") if isinstance(item_data, dict) else None
         item = items[0] if isinstance(items, list) and items and isinstance(items[0], dict) else {}
         additional = item.get("additional") if isinstance(item.get("additional"), dict) else {}
-        known_people = item_metadata(item).get("people", [])
+        metadata = item_metadata(item)
+        known_people = metadata.get("people", [])
+        for key in ("country", "state", "county", "city", "district", "town", "village", "landmark", "route"):
+            value = metadata.get(key)
+            if isinstance(value, str) and value.strip() and value.strip() not in known_location:
+                known_location.append(value.strip())
+        try:
+            place_labels = resolve_photo_place(nas, space, metadata.get("geocoding_id"))
+        except SynologyApiError:
+            place_labels = []
+        for value in place_labels:
+            if value not in known_location:
+                known_location.append(value)
         thumbnail = additional.get("thumbnail") if isinstance(additional.get("thumbnail"), dict) else {}
         if not cache_key:
             cache_key = thumbnail.get("cache_key", "")
@@ -1292,6 +1383,13 @@ def _perform_photo_analysis(photo_id: int):
             "也不可在多人時推斷哪個姓名對應哪張臉；若無法安全地把姓名對應到特定人物，"
             "可在描述中自然提及已標記姓名，但不要指派個別外貌或動作。"
         )
+    if known_location:
+        analysis_prompt += (
+            "\n照片位置 metadata（由 Synology Photos 根據 GPS 提供，僅作地點上下文）："
+            + "、".join(known_location)
+            + "。description 應自然帶出最具體的已提供地名或地標，讓照片描述更明確；"
+            "可在畫面內容吻合時使用地標正式名稱，但不可只憑座標推斷畫面中建築或景物的身分。"
+        )
     try:
         mlx_response = requests.post(
             f"{MLX_SERVER_URL}/photo-analyze",
@@ -1342,6 +1440,7 @@ def _perform_photo_analysis(photo_id: int):
         "bytes_sent": len(image_bytes),
         "analysis": analysis,
         "people": known_people,
+        "location": known_location,
         "ocr": ocr_result,
         "output": output,
         "model": result.get("model"),
