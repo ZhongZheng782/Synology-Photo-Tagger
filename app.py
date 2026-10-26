@@ -31,7 +31,7 @@ API_INFO_PARAMS = {
 API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.3.8")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.3.9")
 MLX_SERVER_URL = os.environ.get(
     "MLX_SERVER_URL", "http://mac-mini.tail28f10.ts.net:5001"
 ).strip().rstrip("/")
@@ -1200,7 +1200,10 @@ def _perform_photo_analysis(photo_id: int):
                 "version": browse_version,
                 "method": "get",
                 "id": json.dumps([photo_id], separators=(",", ":")),
-                "additional": json.dumps(["thumbnail", "person"], separators=(",", ":")),
+                "additional": json.dumps(
+                    ["exif", "description", "orientation", "resolution", "gps", "address", "tag", "person", "thumbnail"],
+                    separators=(",", ":"),
+                ),
                 "_sid": nas.sid,
             },
         )
@@ -1282,10 +1285,12 @@ def _perform_photo_analysis(photo_id: int):
     analysis_prompt = PHOTO_ANALYSIS_PROMPT
     if known_people:
         analysis_prompt += (
-            "\nSynology Photos 已將這張照片標記為包含以下人物："
+            "\n已確認的人物姓名（來自 Synology Photos metadata，並非視覺推測）："
             + "、".join(known_people)
-            + "。可在整體描述中使用這些已確認姓名；不可猜測各姓名分別對應哪張臉，"
-            "也不可把個別外貌或動作指派給特定姓名。"
+            + "。若畫面中有人物，description 必須使用這些已確認姓名描述照片中的人物，"
+            "不要以「一位男士／女士」等泛稱取代已提供的姓名。不可根據外貌猜測姓名，"
+            "也不可在多人時推斷哪個姓名對應哪張臉；若無法安全地把姓名對應到特定人物，"
+            "可在描述中自然提及已標記姓名，但不要指派個別外貌或動作。"
         )
     try:
         mlx_response = requests.post(
