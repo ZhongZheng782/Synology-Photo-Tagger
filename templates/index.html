@@ -97,7 +97,7 @@
           <div class="security-hint"><strong>連線提醒</strong><span>瀏覽器到此 Web UI 使用 HTTP。請只在可信任的區域網路或 SSH tunnel 中輸入 NAS 密碼；瀏覽器到 NAS API 的連線使用已驗證的 HTTPS。</span></div>
           <div class="result-box" id="auth-result" hidden aria-live="polite"></div>
         </article>
-        <aside class="mini-panel privacy-panel browse-note"><div class="privacy-heading"><span>◈</span><strong>先預覽，再決定是否寫入</strong></div><p>照片瀏覽與 AI 分析維持唯讀。你可檢視並編輯 AI 建議；只有再次確認後，才透過 Photos API 寫入選定照片。</p><div class="privacy-foot"><span></span>每頁最多 100 張</div></aside>
+        <aside class="mini-panel privacy-panel browse-note"><div class="privacy-heading"><span>◈</span><strong>先預覽，再決定是否寫入</strong></div><p>照片瀏覽與 AI 分析維持唯讀。你可檢視並編輯 AI 建議；按下「確認並寫入照片」後，才透過 Photos API 寫入選定照片。</p><div class="privacy-foot"><span></span>每頁最多 100 張</div></aside>
       </section>
 
       <section class="module-panel photo-panel" id="photo-browser" {% if not logged_in %}hidden{% endif %}>
@@ -659,16 +659,6 @@
                       writeStatus.classList.add('error-text');
                       return;
                     }
-                    const targetName = photo.filename || `照片 ID ${photo.id}`;
-                    const replaceNotice = result.existing_description && description && description !== result.existing_description
-                      ? '目前描述將被新描述取代。'
-                      : '';
-                    const existingTagNames = new Set((result.existing_tags || []).map(tag => tag.toLocaleLowerCase()));
-                    const alreadySelected = selectedTags.filter(tag => existingTagNames.has(tag.toLocaleLowerCase())).length;
-                    const newTagCount = selectedTags.length - alreadySelected;
-                    const confirmation = `確認透過 Synology Photos API 寫入「${targetName}」（ID ${photo.id}）？\n\n${description ? '將更新照片描述' : '不更新描述'}；選取 ${selectedTags.length} 個標籤（新增 ${newTagCount} 個，${alreadySelected} 個已存在）。${replaceNotice}\n\nPhotos 可能改寫原始檔內容、大小或修改時間。`;
-                    if (!window.confirm(confirmation)) return;
-
                     writeButton.disabled = true;
                     writeButton.textContent = '正在寫入並核對…';
                     writeStatus.hidden = false;
