@@ -272,7 +272,7 @@
 
 ## Docker 開發版
 
-目前程式版本為 **v0.3.19**，包含容器內 Tailscale userspace proxy、私有 MLX 照片分析、文件 OCR、Synology Photos 人物與地點上下文、唯讀標籤盤點，以及 AI 描述與標籤的確認後寫入流程。寫入只針對目前登入者可存取的選定照片；使用者可編輯 AI 描述與標籤，按下「確認並寫入照片」即代表確認並開始寫入，不會再跳出額外確認視窗。描述會取代既有描述，標籤則新增且不會移除其他標籤；寫入後以 Photos API 讀回核對。Synology Photos 可能重寫原檔內容或修改時間，因此介面會在寫入按鈕旁提示。映像發佈後，NAS Compose 將使用 `v0.3.19` 標籤。Docker Hub Repository overview 的同步稿位於 [`DOCKERHUB.md`](DOCKERHUB.md)。
+目前程式版本為 **v0.3.20**，包含容器內 Tailscale userspace proxy、私有 MLX 照片分析、文件 OCR、Synology Photos 人物與地點上下文、唯讀標籤盤點，以及 AI 描述與標籤的確認後寫入流程。寫入只針對目前登入者可存取的選定照片；使用者可編輯 AI 描述與標籤，按下「確認並寫入照片」即代表確認並開始寫入，不會再跳出額外確認視窗。描述會取代既有描述，標籤則新增且不會移除其他標籤；寫入後以 Photos API 讀回核對。Synology Photos 可能重寫原檔內容或修改時間，因此介面會在寫入按鈕旁提示。照片分析最多同時執行 4 項，另有 16 項等待佇列。映像發佈後，NAS Compose 將使用 `v0.3.20` 標籤。Docker Hub Repository overview 的同步稿位於 [`DOCKERHUB.md`](DOCKERHUB.md)。
 
 此版本提供繁體中文 Web 首頁、Photos API 瀏覽、單張照片 AI 分析預覽，以及需明確確認的描述／標籤寫入。使用者可在 UI 輸入 NAS 帳密（支援選填 OTP），登入後切換個人空間／共享空間，以分頁方式查看照片 ID、檔名、拍攝時間、地點及既有標籤；縮圖由本站代理顯示，metadata 按需從 Photos API 取得。候選清單可依日本地點與既有標籤篩選。登入工作階段和篩選索引只保存在服務程序記憶體中。
 

@@ -8,6 +8,7 @@ import secrets
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
@@ -31,7 +32,7 @@ API_INFO_PARAMS = {
 API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.3.19")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.3.20")
 MLX_SERVER_URL = os.environ.get(
     "MLX_SERVER_URL", "http://mac-mini.tail28f10.ts.net:5001"
 ).strip().rstrip("/")
@@ -83,7 +84,12 @@ _photo_place_indexes_lock = threading.Lock()
 _photo_analysis_jobs: dict[str, dict] = {}
 _photo_analysis_jobs_lock = threading.Lock()
 PHOTO_ANALYSIS_JOB_TTL_SECONDS = 900
-PHOTO_ANALYSIS_MAX_ACTIVE_JOBS = 4
+PHOTO_ANALYSIS_MAX_CONCURRENT_JOBS = 4
+PHOTO_ANALYSIS_MAX_PENDING_JOBS = 16
+_photo_analysis_executor = ThreadPoolExecutor(
+    max_workers=PHOTO_ANALYSIS_MAX_CONCURRENT_JOBS,
+    thread_name_prefix="photo-analysis",
+)
 
 
 class SynologyApiError(Exception):
@@ -1329,8 +1335,9 @@ def photo_analyze(photo_id: int):
         for task_id in expired_ids:
             _photo_analysis_jobs.pop(task_id, None)
         active_count = sum(task.get("status") in {"queued", "running"} for task in _photo_analysis_jobs.values())
-        if active_count >= PHOTO_ANALYSIS_MAX_ACTIVE_JOBS:
-            return jsonify({"ok": False, "error": "目前分析工作較多，請稍後再試。"}), 503
+        max_jobs = PHOTO_ANALYSIS_MAX_CONCURRENT_JOBS + PHOTO_ANALYSIS_MAX_PENDING_JOBS
+        if active_count >= max_jobs:
+            return jsonify({"ok": False, "error": "照片分析佇列已滿（最多 20 項），請等候部分工作完成後再試。"}), 503
         task_id = uuid.uuid4().hex
         _photo_analysis_jobs[task_id] = {"status": "queued", "created_at": now, "finished_at": None}
 
@@ -1338,12 +1345,7 @@ def photo_analyze(photo_id: int):
         lambda: _run_photo_analysis_job(task_id, photo_id)
     )
     try:
-        thread = threading.Thread(
-            target=worker_context,
-            name=f"photo-analysis-{task_id[:8]}",
-            daemon=True,
-        )
-        thread.start()
+        _photo_analysis_executor.submit(worker_context)
     except Exception:
         with _photo_analysis_jobs_lock:
             _photo_analysis_jobs.pop(task_id, None)
