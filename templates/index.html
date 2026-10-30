@@ -97,7 +97,7 @@
           <div class="security-hint"><strong>連線提醒</strong><span>瀏覽器到此 Web UI 使用 HTTP。請只在可信任的區域網路或 SSH tunnel 中輸入 NAS 密碼；瀏覽器到 NAS API 的連線使用已驗證的 HTTPS。</span></div>
           <div class="result-box" id="auth-result" hidden aria-live="polite"></div>
         </article>
-        <aside class="mini-panel privacy-panel browse-note"><div class="privacy-heading"><span>◈</span><strong>先預覽，再驗證寫入</strong></div><p>照片瀏覽與 AI 分析維持唯讀。下方 JPG／HEIC API 驗證只在你明確確認後，暫時新增並移除測試標籤；Synology Photos 仍可能重寫原始檔。</p><div class="privacy-foot"><span></span>每頁最多 100 張</div></aside>
+        <aside class="mini-panel privacy-panel browse-note"><div class="privacy-heading"><span>◈</span><strong>先預覽，再決定是否寫入</strong></div><p>照片瀏覽與 AI 分析維持唯讀。你可檢視並編輯 AI 建議；只有再次確認後，才透過 Photos API 寫入選定照片。</p><div class="privacy-foot"><span></span>每頁最多 100 張</div></aside>
       </section>
 
       <section class="module-panel photo-panel" id="photo-browser" {% if not logged_in %}hidden{% endif %}>
@@ -110,11 +110,6 @@
           <label>每頁<select id="limit-select"><option>24</option><option selected>48</option><option>100</option></select></label>
           <button class="primary-button" id="load-photos" type="button">載入照片 <span class="button-arrow">→</span></button>
         </div>
-        <section class="api-write-verification" aria-labelledby="api-write-test-heading">
-          <div><strong id="api-write-test-heading">Synology Photos API 寫入驗證</strong><p>只測試指定的 JPG 與 HEIC 項目：加入唯一臨時標籤、讀回確認、移除標籤，再比較原檔 SHA-256。即使清除測試標籤，Photos 仍可能改變原檔內容或修改時間。</p></div>
-          <div class="api-write-test-actions"><button class="secondary-button" type="button" data-api-write-test="82153">測試 JPG · ID 82153</button><button class="secondary-button" type="button" data-api-write-test="82155">測試 HEIC · ID 82155</button></div>
-          <pre class="api-write-test-result" id="api-write-test-result" hidden aria-live="polite"></pre>
-        </section>
         <details class="tag-inventory" id="tag-inventory" hidden>
           <summary>現有標籤盤點 <span id="tag-inventory-count"></span></summary>
           <div class="tag-inventory-tools"><button class="secondary-button" id="copy-tag-inventory" type="button">複製清單</button></div>
@@ -599,6 +594,130 @@
                   }
                   analysisResult.append(tags);
                 }
+                if (result.analysis && (result.analysis.description || result.analysis.tags?.length)) {
+                  const writeForm = document.createElement('form');
+                  writeForm.className = 'analysis-write-form';
+                  const writeTitle = document.createElement('strong');
+                  writeTitle.textContent = '確認內容後寫入 Synology Photos';
+                  const writeHelp = document.createElement('p');
+                  writeHelp.textContent = '可先編輯描述與標籤。描述留白代表不更新；標籤一行一個，已存在的標籤不會重複新增。寫入可能改變原始檔內容或修改時間。';
+
+                  const descriptionLabel = document.createElement('label');
+                  descriptionLabel.textContent = '照片描述';
+                  const descriptionInput = document.createElement('textarea');
+                  descriptionInput.rows = 3;
+                  descriptionInput.maxLength = 5000;
+                  descriptionInput.value = result.analysis.description || '';
+                  descriptionLabel.append(descriptionInput);
+
+                  let existingDescriptionDetails = null;
+                  if (result.existing_description) {
+                    existingDescriptionDetails = document.createElement('details');
+                    existingDescriptionDetails.className = 'analysis-existing-description';
+                    const existingSummary = document.createElement('summary');
+                    existingSummary.textContent = '查看 Synology Photos 目前描述（若提交新描述會取代）';
+                    const existingText = document.createElement('p');
+                    existingText.textContent = result.existing_description;
+                    existingDescriptionDetails.append(existingSummary, existingText);
+                  }
+
+                  const tagsLabel = document.createElement('label');
+                  tagsLabel.textContent = '標籤（一行一個，可刪除或增補）';
+                  const tagsInput = document.createElement('textarea');
+                  tagsInput.rows = Math.max(2, Math.min(5, result.analysis.tags?.length || 2));
+                  tagsInput.maxLength = 2500;
+                  tagsInput.value = (result.analysis.tags || []).join('\n');
+                  tagsLabel.append(tagsInput);
+
+                  let existingTagsNote = null;
+                  if (result.existing_tags?.length) {
+                    existingTagsNote = document.createElement('small');
+                    existingTagsNote.className = 'analysis-existing-tags';
+                    existingTagsNote.textContent = `照片已有標籤：${result.existing_tags.join('、')}`;
+                  }
+
+                  const writeButton = document.createElement('button');
+                  writeButton.className = 'primary-button analysis-write-button';
+                  writeButton.type = 'submit';
+                  writeButton.textContent = '確認並寫入照片';
+                  const writeStatus = document.createElement('div');
+                  writeStatus.className = 'analysis-write-status';
+                  writeStatus.hidden = true;
+                  writeStatus.setAttribute('aria-live', 'polite');
+                  writeForm.append(writeTitle, writeHelp);
+                  if (existingDescriptionDetails) writeForm.append(existingDescriptionDetails);
+                  writeForm.append(descriptionLabel);
+                  if (existingTagsNote) writeForm.append(existingTagsNote);
+                  writeForm.append(tagsLabel, writeButton, writeStatus);
+                  writeForm.addEventListener('submit', async event => {
+                    event.preventDefault();
+                    const description = descriptionInput.value.trim();
+                    const selectedTags = tagsInput.value.split(/\r?\n/).map(tag => tag.trim()).filter(Boolean);
+                    if (!description && !selectedTags.length) {
+                      writeStatus.hidden = false;
+                      writeStatus.textContent = '請保留描述或至少一個標籤。';
+                      writeStatus.classList.add('error-text');
+                      return;
+                    }
+                    const targetName = photo.filename || `照片 ID ${photo.id}`;
+                    const replaceNotice = result.existing_description && description && description !== result.existing_description
+                      ? '目前描述將被新描述取代。'
+                      : '';
+                    const existingTagNames = new Set((result.existing_tags || []).map(tag => tag.toLocaleLowerCase()));
+                    const alreadySelected = selectedTags.filter(tag => existingTagNames.has(tag.toLocaleLowerCase())).length;
+                    const newTagCount = selectedTags.length - alreadySelected;
+                    const confirmation = `確認透過 Synology Photos API 寫入「${targetName}」（ID ${photo.id}）？\n\n${description ? '將更新照片描述' : '不更新描述'}；選取 ${selectedTags.length} 個標籤（新增 ${newTagCount} 個，${alreadySelected} 個已存在）。${replaceNotice}\n\nPhotos 可能改寫原始檔內容、大小或修改時間。`;
+                    if (!window.confirm(confirmation)) return;
+
+                    writeButton.disabled = true;
+                    writeButton.textContent = '正在寫入並核對…';
+                    writeStatus.hidden = false;
+                    writeStatus.classList.remove('error-text');
+                    writeStatus.textContent = '正在透過 Photos API 寫入，並讀回確認結果…';
+                    try {
+                      const params = new URLSearchParams({space: data.space});
+                      const response = await fetch(`/api/photos/${encodeURIComponent(photo.id)}/write-analysis?${params}`, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({confirmed: true, description, tags: selectedTags}),
+                      });
+                      const responseText = await response.text();
+                      let writeResult;
+                      try {
+                        writeResult = JSON.parse(responseText);
+                      } catch {
+                        throw new Error(`Photos API 寫入回應無法解析（HTTP ${response.status}）；請重新載入照片確認是否已寫入，再決定是否重試。`);
+                      }
+                      if (!response.ok || !writeResult.ok) {
+                        const reasons = [writeResult.description_error, writeResult.tags_error, writeResult.readback_error].filter(Boolean);
+                        writeStatus.textContent = `${reasons.join('；') || '寫入或讀回核對失敗。'}\n${JSON.stringify(writeResult, null, 2)}`;
+                        writeStatus.classList.add('error-text');
+                        if (response.status >= 500 || writeResult.description_api_succeeded || writeResult.tags_api_succeeded) {
+                          writeButton.disabled = true;
+                          writeButton.textContent = '請先重新核對照片';
+                        } else {
+                          writeButton.disabled = false;
+                          writeButton.textContent = '修正後重試';
+                        }
+                        return;
+                      }
+                      heading.textContent = '已寫入 Synology Photos，並已讀回核對';
+                      const outcome = [
+                        writeResult.description_verified ? (description ? '描述已核對' : '描述未變更') : '描述未核對',
+                        writeResult.tags_added?.length ? `新增標籤：${writeResult.tags_added.join('、')}` : '',
+                        writeResult.tags_already_present?.length ? `原有標籤：${writeResult.tags_already_present.join('、')}` : '',
+                      ].filter(Boolean).join('；');
+                      writeStatus.textContent = `成功：${outcome || '內容已核對'}。`;
+                      writeButton.textContent = '已寫入並核對';
+                    } catch (writeError) {
+                      writeStatus.textContent = writeError.message || '寫入結果未能確認；請重新載入照片核對後再決定是否重試。';
+                      writeStatus.classList.add('error-text');
+                      writeButton.disabled = true;
+                      writeButton.textContent = '請先重新核對照片';
+                    }
+                  });
+                  analysisResult.append(writeForm);
+                }
                 if (!result.analysis) {
                   const raw = document.createElement('pre');
                   raw.className = 'analysis-raw';
@@ -800,34 +919,6 @@
       photoBrowser.hidden = true;
       resetPhotoTags();
       showAuthResult('已登出 Synology Photos。', 'success');
-    });
-
-    document.querySelectorAll('[data-api-write-test]')?.forEach(button => {
-      button.addEventListener('click', async () => {
-        const photoId = button.dataset.apiWriteTest;
-        const format = photoId === '82153' ? 'JPG' : 'HEIC';
-        const resultBox = document.getElementById('api-write-test-result');
-        if (!window.confirm(`即將透過 Synology Photos API 對 ${format}（ID ${photoId}）新增並移除唯一測試標籤。Photos 可能重寫原始檔；移除標籤不保證檔案位元組或修改時間復原。要繼續嗎？`)) return;
-        button.disabled = true;
-        resultBox.hidden = false;
-        resultBox.textContent = `正在驗證 ${format}（ID ${photoId}）；請勿關閉頁面…`;
-        try {
-          const space = document.getElementById('space-select').value;
-          const response = await fetch(`/api/photos/${encodeURIComponent(photoId)}/api-write-test?space=${encodeURIComponent(space)}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ confirmed: true }),
-          });
-          const payload = await response.json();
-          resultBox.textContent = JSON.stringify(payload, null, 2);
-          resultBox.classList.toggle('error-text', !response.ok || !payload.ok);
-        } catch (error) {
-          resultBox.textContent = error.message || 'Photos API 寫入驗證失敗。';
-          resultBox.classList.add('error-text');
-        } finally {
-          button.disabled = false;
-        }
-      });
     });
 
     document.getElementById('load-photos')?.addEventListener('click', () => loadPhotos(0));
