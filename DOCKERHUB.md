@@ -1,6 +1,6 @@
-# Synology Photo Tagger v0.3.20
+# Synology Photo Tagger v0.4.0
 
-A lightweight Python web app for browsing a Synology Photos library and inspecting photo metadata before building an AI tagging workflow.
+A Python web app for browsing Synology Photos, analyzing candidate photos, and managing reviewed AI tagging jobs.
 
 ## Current features
 
@@ -15,8 +15,14 @@ A lightweight Python web app for browsing a Synology Photos library and inspecti
 - Verifies tag-writing behavior for the specified JPG and HEIC items only after explicit confirmation: it adds a unique temporary tag, reads it back, removes it, and compares original-file SHA-256 values through the Photos API.
 - Supplies the currently signed-in user's selected-space tag names to the AI as a vocabulary; if the Photos API cannot provide them, analysis continues without borrowing another user's tags.
 - Keeps the NAS session on the server and serves the original photo folder as a read-only mount.
+- Creates a fixed candidate snapshot from selected personal/shared space, Japan location, and existing-tag filters (maximum 300 candidates and 40 source pages).
+- Analyzes candidates one by one for a shopping task and shows thumbnail, evidence, confidence, and description for human review.
+- Lets the signed-in user accept, reject, or choose an existing tag from their selected Photos space; “購物” can be created when accepted.
+- Writes only accepted items after the user presses the job write button, then reads back and verifies each result through the Photos API.
+- Downloads a per-job JSON report, safely retries failed analysis, and removes only tag IDs that the job itself added.
+- Persists job records and reports in SQLite on the `tagger-data` Docker volume. Original photos and OCR text are not stored in the job database.
 
-This v0.3.20 release lets a signed-in user review and edit an AI description and suggested tags, then explicitly confirm writing them to the selected Synology Photos item. The app uses the Photos API, creates or resolves tag IDs, writes the description and tags, then reads the item back to verify them. A description replaces the current description; selected tags are added without removing existing tags. Synology Photos may rewrite original-file metadata, content, size, or modification time. The write form explains the effects next to the submit button; clicking it starts the write without a second confirmation dialog. The prior JPG/HEIC API write check verified Photos can read/write tags on IDs 82153 and 82155; the JPG test changed file bytes, while the HEIC test did not. It includes an inventory of existing Synology Photos tags and their item counts. Photo analysis runs up to four jobs concurrently and queues up to sixteen more, showing queued work instead of immediately rejecting it. During photo analysis, the app reads tag names from the currently signed-in user's selected Photos space and asks the model to reuse exact existing names when relevant, proposing new terms only when the current vocabulary has no good fit. If the tag API is unavailable, analysis proceeds without a vocabulary; another user's tags are never used. Usage counts do not affect relevance, and person tags can only use names confirmed in the selected photo metadata. For an explicitly selected photo, the app retrieves the original and person/location metadata through the Synology Photos API. Analysis requests fetch the same metadata as the photo details panel. Confirmed Synology Photos names and GPS-derived place names are supplied as context for the AI description; Photo Tagger does not infer which face corresponds to each name or identify a landmark from coordinates alone. The app holds the original in memory and uploads it once to the private MLX server for visual suggestions; if those identify a scanned document, the server runs OCR asynchronously using the same request-scoped image file. Original retrieval and analysis run in a background job, while the browser polls short status requests to avoid gateway timeouts. The UI distinguishes queued OCR (waiting) from active OCR (processing) and shows elapsed time. Neither the original nor OCR output is saved by Photo Tagger. Tailscale userspace networking provides an HTTP proxy for MLX requests without granting the container network administration capabilities. The web server uses threads so long analysis requests do not block other UI requests. Synology Photos API behavior can vary by DSM and Photos version.
+This v0.4.0 release adds persistent, per-job AI tagging workflows. A job snapshots filtered candidates, analyzes the shopping task, and presents each photo for human review. Users can accept, reject, or choose an existing tag in their selected Photos space; accepting “購物” may create that tag if needed. Nothing is written until the user clicks “寫入已接受項目”. Each accepted photo is updated and read back through the Photos API. The job report records the outcome; undo removes only tag IDs added by that job. A job cannot restore original-file bytes or unrelated metadata that Synology Photos may rewrite. Candidate snapshots are limited to 300 items and 40 source pages and disclose when the scan is incomplete. SQLite stores candidate display fields, analysis summaries, review decisions, and write/undo outcomes in the persistent `tagger-data` named volume. It does not store the original photo or OCR output. Existing individual-photo analysis and confirmed description/tag editing remain available. Analysis runs up to four jobs concurrently and queues up to sixteen more. Synology Photos API behavior can vary by DSM and Photos version.
 
 ## Quick start
 
@@ -28,12 +34,12 @@ docker compose up -d
 
 Open `http://localhost:5056/`. Set `SYNOLOGY_URL` to the DSM address reachable from the container. Sign in through the web UI with a Synology account that can access Photos.
 
-The provided Compose file uses the versioned `v0.3.20` image tag. Docker Hub retains only tags in the `vX.Y.Z` format; the publishing workflow removes floating (`latest`), commit (`sha-*`), and non-three-part version tags. Photo analysis runs up to four jobs concurrently and queues up to sixteen more. Set `MLX_SERVER_URL`, `MLX_SERVER_API_KEY`, and a dedicated Tailscale `TAILSCALE_AUTHKEY` in `.env` to enable analysis. `MLX_OCR_ENGINE` selects `baidu` (default) or `glm` for document OCR. Tailscale node state persists in a Docker named volume.
+The provided Compose file uses the versioned `v0.4.0` image tag. Docker Hub retains only tags in the `vX.Y.Z` format; the publishing workflow removes floating (`latest`), commit (`sha-*`), and non-three-part version tags. Set `MLX_SERVER_URL`, `MLX_SERVER_API_KEY`, and a dedicated Tailscale `TAILSCALE_AUTHKEY` in `.env` to enable analysis. `MLX_OCR_ENGINE` selects `baidu` (default) or `glm` for document OCR. Tailscale node state and AI job records persist in separate Docker named volumes.
 
 ## Image
 
 ```sh
-docker pull wenchiehlee1020/synology-photo-tagger:v0.3.20
+docker pull wenchiehlee1020/synology-photo-tagger:v0.4.0
 ```
 
 Source: [GitHub](https://github.com/ZhongZheng782/Synology-Photo-Tagger)

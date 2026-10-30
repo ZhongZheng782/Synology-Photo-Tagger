@@ -258,23 +258,17 @@
 - [eleonne/synology-tagger](https://github.com/eleonne/synology-tagger)：以機器學習擴充 Synology Photos 搜尋的開源實作。它將分類結果寫入 Synology Photos 的 `general_tag` 與 `many_unit_has_many_general_tag` 資料表；本專案僅將其作為設計參考，仍採 metadata-first 策略，不直接寫入 Synology Photos 內部資料庫。
 - [zeichensatz/SynologyPhotosAPI](https://github.com/zeichensatz/SynologyPhotosAPI)：Synology Photos API 的非官方探索文件，供 API 探測與整合設計參考；內容尚不完整，實際支援的 API 與參數仍須在目標 NAS 上驗證。
 
-## MVP 範圍
+## 目前 AI 標記工作範圍
 
-第一個可驗證版本只完成 UC-01：
+v0.4.0 先提供一條完整的 UC-01 工作流程：依日本地點／既有標籤建立固定照片快照，逐張分析購物情境，人工審核標籤，再由 Photos API 寫入並讀回核對。每個工作只有一種分析任務；目前支援「購物情境」。每個工作最多 300 張候選，掃描最多 40 頁，並會顯示快照是否完整。
 
-- 選出「地點在日本」的支援圖片。
-- 以 MLX 視覺模型判斷 `購物`。
-- 高信心結果寫入可攜 metadata。
-- 產生處理報告與待複核清單。
-- 驗證標籤在 Synology Photos 中可搜尋。
-
-暫不納入：影片標註、任意自然語言 taxonomy、大量舊相片全庫掃描，以及任何直接寫入 Synology Photos 資料庫的做法。
+影片標註、可自訂的多種 AI 任務、跨全庫無限制掃描，以及直接寫入 Synology Photos 資料庫仍不在此版本範圍內。
 
 ## Docker 開發版
 
-目前程式版本為 **v0.3.20**，包含容器內 Tailscale userspace proxy、私有 MLX 照片分析、文件 OCR、Synology Photos 人物與地點上下文、唯讀標籤盤點，以及 AI 描述與標籤的確認後寫入流程。寫入只針對目前登入者可存取的選定照片；使用者可編輯 AI 描述與標籤，按下「確認並寫入照片」即代表確認並開始寫入，不會再跳出額外確認視窗。描述會取代既有描述，標籤則新增且不會移除其他標籤；寫入後以 Photos API 讀回核對。Synology Photos 可能重寫原檔內容或修改時間，因此介面會在寫入按鈕旁提示。照片分析最多同時執行 4 項，另有 16 項等待佇列。映像發佈後，NAS Compose 將使用 `v0.3.20` 標籤。Docker Hub Repository overview 的同步稿位於 [`DOCKERHUB.md`](DOCKERHUB.md)。
+目前程式版本為 **v0.4.0**。此版本新增 AI 標記工作：依個人或共享空間、日本地點及既有標籤建立固定候選快照；逐張分析購物情境，展示縮圖、判斷理由與信心分數；人工可接受、略過，或選擇目前空間的既有標籤／新增「購物」標籤。只有人工接受後再按「寫入已接受項目」才會透過 Photos API 寫入，並逐張讀回核對。工作可下載 JSON 報告、安全重跑分析失敗項目，或撤銷該工作實際新增的標籤。標籤寫入可能改變照片原檔 metadata；撤銷只移除工作新增的標籤，不會復原檔案位元組或其他 metadata。候選最多 300 張、最多掃描 40 頁；達上限時工作會註明快照不完整。工作資料與報告存在 `/data/photo-tagger.sqlite3`，Compose named volume `tagger-data` 會跨容器重建保留；原圖與 OCR 原文不會存進工作資料庫。映像發佈後，NAS Compose 使用 `v0.4.0` 標籤。Docker Hub Repository overview 的同步稿位於 [`DOCKERHUB.md`](DOCKERHUB.md)。
 
-此版本提供繁體中文 Web 首頁、Photos API 瀏覽、單張照片 AI 分析預覽，以及需明確確認的描述／標籤寫入。使用者可在 UI 輸入 NAS 帳密（支援選填 OTP），登入後切換個人空間／共享空間，以分頁方式查看照片 ID、檔名、拍攝時間、地點及既有標籤；縮圖由本站代理顯示，metadata 按需從 Photos API 取得。候選清單可依日本地點與既有標籤篩選。登入工作階段和篩選索引只保存在服務程序記憶體中。
+此版本提供繁體中文 Web 首頁、Photos API 瀏覽、單張照片 AI 分析預覽，以及 AI 標記工作。使用者可在 UI 輸入 NAS 帳密（支援選填 OTP），登入後切換個人空間／共享空間，以分頁方式查看照片 ID、檔名、拍攝時間、地點及既有標籤；縮圖由本站代理顯示，metadata 按需從 Photos API 取得。候選清單可依日本地點與既有標籤篩選。登入工作階段和篩選索引只保存在服務程序記憶體中；工作快照、分析摘要、審核結果及 Photos 寫入回讀狀態保存在 SQLite named volume。
 
 點選照片卡片的「本機 AI 分析」後，服務以 Synology Photos API 讀取單張原圖，記憶體暫存後以單一 `/photo-analyze` 請求上傳到 Tailscale 私有網路中的 Mac-mini MLX。若視覺分析判斷內容為掃描文件，Mac-mini 會用同一份請求暫存影像接續 OCR，無須再從 Photo Tagger 重傳。HEIC/HEIF 會在 Mac-mini 轉成暫存 JPEG，供視覺分析和 OCR 共用。原圖與 OCR 結果不寫入容器磁碟、Synology Photos 或照片檔案。描述、標籤與 OCR 文字僅顯示在候選清單。每張原圖限制 30 MiB；超出上限需先使用其他工作流程處理。
 
@@ -284,7 +278,9 @@
 2. 執行 `docker compose up -d --build`。
 3. 瀏覽 `http://NAS_IP:5056`；可用 `WEB_PORT` 調整對外埠號。
 4. 按「探索 Photos API」確認模組後，在登入區輸入有 Synology Photos 權限的 NAS 帳號與密碼；有啟用雙重驗證時輸入當次 OTP。然後選擇空間並載入照片清單。
-5. 先選一張照片按「本機 AI 分析」，確認描述與標籤建議後再決定後續工作流程；本版本不會把建議寫回 Synology Photos。
+5. 先選一張照片按「本機 AI 分析」，確認單張建議流程可用。
+6. 若要批次建立購物標籤，套用空間、地點及標籤篩選後，在「AI 標記工作」建立工作並先檢視固定候選快照。
+7. 按「分析尚未完成的照片」後逐張查看縮圖和證據；接受時可選擇現有標籤或「購物」。最後按「寫入已接受項目」才會開始寫入。工作詳情可下載報告、重跑失敗分析或撤銷工作新增的標籤。
 
 直接使用 HTTP 埠時，登入密碼會在瀏覽器與 Web UI 之間傳送；只應在可信任的 LAN 或 SSH tunnel 中使用。需要跨不可信網路存取時，應先透過 DSM 反向代理或其他 TLS 終端提供 HTTPS，再登入。NAS API 端連線會驗證 TLS 憑證，不支援關閉驗證。
 

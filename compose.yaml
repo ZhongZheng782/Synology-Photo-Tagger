@@ -1,6 +1,6 @@
 services:
   synology-photo-tagger:
-    image: wenchiehlee1020/synology-photo-tagger:v0.3.20
+    image: wenchiehlee1020/synology-photo-tagger:v0.4.0
     build: .
     container_name: SYNOLOGY-PHOTO-TAGGER
     restart: unless-stopped
@@ -16,6 +16,7 @@ services:
       TAILSCALE_HOSTNAME: ${TAILSCALE_HOSTNAME:-synology-photo-tagger}
       MLX_HTTP_PROXY: ${MLX_HTTP_PROXY:-http://127.0.0.1:1055}
       PHOTO_LIBRARY_PATH: /Photos
+      TAGGER_DB_PATH: /data/photo-tagger.sqlite3
       DEBUG_SHELL: ${DEBUG_SHELL:-false}
     extra_hosts:
       - "wenchiehlee.synology.me:192.168.31.101"
@@ -26,6 +27,8 @@ services:
       - ${PHOTO_LIBRARY_PATH:-/volume1/homes/wjlee/Photos}:/Photos:ro
       - ${DEBUG_SSH_DIR:-/volume1/docker/synology-photo-tagger/ssh}:/run/ssh:ro
       - tailscale-state:/var/lib/tailscale
+      - tagger-data:/data
 
 volumes:
   tailscale-state:
+  tagger-data:

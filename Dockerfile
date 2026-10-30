@@ -1,9 +1,9 @@
 FROM python:3.11-slim
 
-ARG APP_VERSION=v0.3.20
+ARG APP_VERSION=v0.4.0
 LABEL org.opencontainers.image.title="Synology Photo Tagger" \
       org.opencontainers.image.version="${APP_VERSION}" \
-      org.opencontainers.image.description="Synology Photos browser with private MLX analysis and confirmed JPG/HEIC API write verification."
+      org.opencontainers.image.description="Synology Photos AI tagging jobs with review, confirmed writes, reports, and undo."
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends bash ca-certificates curl openssh-server \

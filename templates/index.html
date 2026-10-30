@@ -7,6 +7,7 @@
   <title>Synology Photo Tagger</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='tag-inventory.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='tag-jobs.css') }}">
 </head>
 <body>
   <div class="app-shell">
@@ -20,8 +21,8 @@
       <nav class="main-nav" aria-label="主要導覽">
         <a class="nav-item active" href="#overview"><span class="nav-icon">◫</span>總覽</a>
         <a class="nav-item" href="#connection"><span class="nav-icon">⌁</span>照片來源</a>
-        <a class="nav-item disabled" href="#jobs" aria-disabled="true"><span class="nav-icon">✳</span>AI 標記工作 <em>即將推出</em></a>
-        <a class="nav-item disabled" href="#review" aria-disabled="true"><span class="nav-icon">☷</span>人工複核 <em>即將推出</em></a>
+        <a class="nav-item" href="#tag-job-workspace"><span class="nav-icon">✳</span>AI 標記工作</a>
+        <a class="nav-item" href="#tag-job-detail"><span class="nav-icon">☷</span>人工複核</a>
       </nav>
 
       <div class="sidebar-bottom">
@@ -66,7 +67,7 @@
         </article>
 
         <aside class="side-panels">
-          <article class="mini-panel next-panel"><div class="mini-icon">✳</div><div class="mini-kicker">NEXT UP</div><h3>建立你的第一個<br>AI 標記工作</h3><p>從 Synology 相簿挑選照片，再讓本機模型辨識內容。</p><span class="coming-label">連線確認後即可開始</span></article>
+          <article class="mini-panel next-panel"><div class="mini-icon">✳</div><div class="mini-kicker">AI TAGGING</div><h3>從日本照片中<br>整理購物標籤</h3><p>固定候選快照，逐張檢視模型證據，再決定是否寫入。</p><a class="coming-label" href="#tag-job-workspace">建立標記工作</a></article>
           <article class="mini-panel privacy-panel"><div class="privacy-heading"><span>◈</span><strong>預覽維持唯讀</strong></div><p>一般瀏覽與 AI 分析不會寫回標籤。只有你明確確認下方 API 測試時，才會短暫新增並移除標籤；Synology Photos 仍可能改寫原檔。</p><div class="privacy-foot"><span></span>你的資料由你掌握</div></article>
         </aside>
       </section>
@@ -118,6 +119,24 @@
         </details>
         <div class="photo-list" id="photo-list" aria-live="polite"><div class="photo-empty">登入後載入照片清單。</div></div>
         <div class="photo-pagination"><span id="page-label">—</span><div><button class="secondary-button" id="prev-page" type="button" disabled>上一頁</button><button class="secondary-button" id="next-page" type="button" disabled>下一頁</button></div></div>
+      </section>
+
+      <section class="module-panel tag-job-panel" id="tag-job-workspace" {% if not logged_in %}hidden{% endif %}>
+        <div class="module-heading"><div><p class="eyebrow">AI TAGGING WORK</p><h2>建立 AI 標記工作</h2></div><span class="module-count">先建立快照，再逐張複核</span></div>
+        <p class="module-intro">目前 MVP 任務：從日本照片判斷購物情境。工作建立後固定候選照片清單；分析與預覽不會寫入 Synology Photos。</p>
+        <div class="tag-job-controls">
+          <label>候選照片上限<select id="tag-job-limit"><option>50</option><option selected>100</option><option>200</option><option>300</option></select></label>
+          <span class="tag-job-task">AI 任務<strong>購物情境</strong></span>
+          <button class="primary-button" id="create-tag-job" type="button">依目前篩選建立工作</button>
+        </div>
+        <div class="tag-job-notice" id="tag-job-notice" hidden role="status" aria-live="polite"></div>
+        <div class="tag-job-list" id="tag-job-list"><p class="photo-empty">登入後即可建立與查看標記工作。</p></div>
+        <section class="tag-job-detail" id="tag-job-detail" hidden>
+          <div class="module-heading"><div><p class="eyebrow">JOB REVIEW</p><h3 id="tag-job-title">標記工作</h3></div><button class="secondary-button" id="close-tag-job" type="button">返回工作清單</button></div>
+          <div class="tag-job-report" id="tag-job-report"></div>
+          <div class="tag-job-actions" id="tag-job-actions"></div>
+          <div class="tag-job-items" id="tag-job-items"></div>
+        </section>
       </section>
 
       <footer class="footer"><span>Synology Photo Tagger <span class="footer-sep">·</span> API exploration build</span><span>照片與標籤由你掌控 <span class="footer-heart">✦</span></span></footer>
@@ -833,6 +852,323 @@
       }
     }
 
+    let activeTagJobId = null;
+    let tagJobPollTimer = null;
+
+    function setTagJobNotice(message, error = false) {
+      const notice = document.getElementById('tag-job-notice');
+      notice.hidden = !message;
+      notice.textContent = message || '';
+      notice.classList.toggle('error-text', error);
+    }
+
+    async function tagJobRequest(url, options = {}) {
+      const response = await fetch(url, options);
+      const text = await response.text();
+      let payload;
+      try { payload = JSON.parse(text); }
+      catch { throw new Error(`工作服務回傳非 JSON（HTTP ${response.status}）。`); }
+      if (!response.ok || !payload.ok) throw new Error(payload.error || `工作服務錯誤（HTTP ${response.status}）。`);
+      return payload;
+    }
+
+    function tagJobStatusText(status) {
+      return ({
+        preparing: '正在建立候選快照', ready: '待分析', analyzing: '分析中',
+        review: '待複核', writing: '寫入中', written: '已寫入',
+        needs_attention: '需要核對', undoing: '撤銷中', undone: '已撤銷',
+        partially_undone: '部分撤銷', interrupted: '曾中斷', failed: '失敗', empty: '沒有候選照片'
+      })[status] || status;
+    }
+
+    async function loadTagJobs() {
+      const list = document.getElementById('tag-job-list');
+      try {
+        const payload = await tagJobRequest('/api/tag-jobs');
+        list.replaceChildren();
+        if (!payload.jobs?.length) {
+          list.append(Object.assign(document.createElement('p'), {className: 'photo-empty', textContent: '尚無標記工作。先套用照片空間與篩選條件，再建立第一個工作。'}));
+          return;
+        }
+        for (const job of payload.jobs) {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = `tag-job-row${job.id === activeTagJobId ? ' active' : ''}`;
+          const title = document.createElement('strong');
+          title.textContent = `購物 · ${job.criteria.country === 'japan' ? '日本' : '標籤篩選'} · ${job.counts.candidates} 張`;
+          const detail = document.createElement('small');
+          detail.textContent = `${job.space === 'personal' ? '個人空間' : '共享空間'} · ${tagJobStatusText(job.status)} · 接受 ${job.counts.accepted} · 已寫入 ${job.counts.written}`;
+          button.append(title, detail);
+          button.addEventListener('click', () => openTagJob(job.id));
+          list.append(button);
+        }
+      } catch (error) {
+        list.replaceChildren(Object.assign(document.createElement('p'), {className: 'photo-empty error-text', textContent: error.message || '無法載入標記工作。'}));
+      }
+    }
+
+    async function setJobReview(jobId, photoId, decision, tag = '購物') {
+      await tagJobRequest(`/api/tag-jobs/${encodeURIComponent(jobId)}/items/${encodeURIComponent(photoId)}/review`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({decision, tag}),
+      });
+      await openTagJob(jobId);
+    }
+
+    function renderTagJobItems(job, items) {
+      const container = document.getElementById('tag-job-items');
+      container.replaceChildren();
+      for (const item of items) {
+        const photo = item.photo || {};
+        const card = document.createElement('article');
+        card.className = 'tag-job-item';
+        const preview = document.createElement('div');
+        if (photo.thumbnail_ready && photo.thumbnail_cache_key) {
+          const image = document.createElement('img');
+          image.alt = `${photo.filename || '照片'} 縮圖`;
+          image.loading = 'lazy';
+          image.src = `/api/photos/${encodeURIComponent(photo.id)}/thumbnail?${new URLSearchParams({space: job.space, cache_key: photo.thumbnail_cache_key, size: photo.thumbnail_size || 'm'})}`;
+          preview.append(image);
+        } else {
+          preview.className = 'tag-job-no-thumb';
+          preview.textContent = '▧';
+        }
+        const content = document.createElement('div');
+        content.className = 'tag-job-item-content';
+        const heading = document.createElement('strong');
+        heading.textContent = photo.filename || `照片 ID ${photo.id}`;
+        const state = document.createElement('small');
+        const decisionText = ({pending: '待分析', review: '待複核', accepted: '已接受', rejected: '已略過'})[item.review] || item.review;
+        state.textContent = `${tagJobStatusText(item.status)} · ${decisionText}${item.attempts ? ` · 分析 ${item.attempts} 次` : ''}`;
+        content.append(heading, state);
+        if (item.analysis) {
+          const analysis = item.analysis;
+          const confidence = document.createElement('p');
+          confidence.textContent = `${analysis.task_relevant ? '可能是購物情境' : '未辨識為購物情境'} · 信心 ${(analysis.confidence * 100).toFixed(0)}%`;
+          content.append(confidence);
+          if (analysis.description) {
+            const desc = document.createElement('p');
+            desc.textContent = analysis.description;
+            content.append(desc);
+          }
+          if (analysis.evidence?.length) {
+            const evidence = document.createElement('small');
+            evidence.textContent = `可見線索：${analysis.evidence.join('、')}`;
+            content.append(evidence);
+          }
+        }
+        if (item.write?.ok) {
+          const written = document.createElement('p');
+          written.className = 'tag-job-result';
+          written.textContent = item.write.tags_added?.length ? `已新增：${item.write.tags_added.join('、')}` : '標籤已存在，讀回核對完成。';
+          content.append(written);
+        }
+        if (item.undo_status === 'undone') {
+          const undone = document.createElement('p');
+          undone.className = 'tag-job-result';
+          undone.textContent = '此工作新增的標籤已撤銷。';
+          content.append(undone);
+        }
+        if (item.error) {
+          const error = document.createElement('small');
+          error.className = 'error-text';
+          error.textContent = item.error;
+          content.append(error);
+        }
+        if (item.status === 'analyzed') {
+          const controls = document.createElement('div');
+          controls.className = 'tag-job-review-buttons';
+          const tagSelect = document.createElement('select');
+          tagSelect.className = 'tag-job-label-select';
+          const tagNames = new Set(['購物']);
+          for (const option of document.querySelectorAll('#tag-select option')) {
+            if (option.value) tagNames.add(option.value);
+          }
+          for (const name of [...tagNames].sort((a, b) => a.localeCompare(b, 'zh-Hant'))) {
+            const option = document.createElement('option');
+            option.value = name;
+            option.textContent = name === '購物' ? '購物（新增標籤）' : name;
+            tagSelect.append(option);
+          }
+          tagSelect.value = item.reviewed_tag || '購物';
+          const accept = document.createElement('button');
+          accept.type = 'button';
+          accept.className = 'primary-button';
+          accept.textContent = item.review === 'accepted' ? `已接受「${item.reviewed_tag || '購物'}」` : '接受此標籤';
+          accept.disabled = item.review === 'accepted' && tagSelect.value === (item.reviewed_tag || '購物');
+          accept.addEventListener('click', async () => {
+            accept.disabled = true;
+            try { await setJobReview(job.id, photo.id, 'accepted', tagSelect.value); }
+            catch (error) { setTagJobNotice(error.message, true); accept.disabled = false; }
+          });
+          tagSelect.addEventListener('change', () => {
+            accept.disabled = item.review === 'accepted' && tagSelect.value === (item.reviewed_tag || '購物');
+            accept.textContent = item.review === 'accepted' && !accept.disabled ? '更新接受的標籤' : '接受此標籤';
+          });
+          const reject = document.createElement('button');
+          reject.type = 'button';
+          reject.className = 'secondary-button';
+          reject.textContent = item.review === 'rejected' ? '已略過' : '略過';
+          reject.addEventListener('click', async () => {
+            try { await setJobReview(job.id, photo.id, 'rejected'); }
+            catch (error) { setTagJobNotice(error.message, true); }
+          });
+          controls.append(tagSelect, accept, reject);
+          content.append(controls);
+        }
+        card.append(preview, content);
+        container.append(card);
+      }
+    }
+
+    function startTagJobPolling(jobId) {
+      if (tagJobPollTimer) window.clearInterval(tagJobPollTimer);
+      tagJobPollTimer = window.setInterval(async () => {
+        try {
+          const payload = await tagJobRequest(`/api/tag-jobs/${encodeURIComponent(jobId)}`);
+          renderTagJob(payload);
+          if (!['preparing', 'analyzing', 'writing', 'undoing'].includes(payload.job.status)) {
+            window.clearInterval(tagJobPollTimer);
+            tagJobPollTimer = null;
+            loadTagJobs();
+          }
+        } catch (error) {
+          setTagJobNotice(error.message, true);
+        }
+      }, 2000);
+    }
+
+    function renderTagJob(payload) {
+      const {job, items} = payload;
+      activeTagJobId = job.id;
+      const detail = document.getElementById('tag-job-detail');
+      detail.hidden = false;
+      document.getElementById('tag-job-title').textContent = `購物標記工作 · ${job.id.slice(0, 8)}`;
+      const report = document.getElementById('tag-job-report');
+      const counts = job.counts;
+      report.textContent = `狀態：${tagJobStatusText(job.status)}　候選 ${counts.candidates}　已分析 ${counts.analyzed}　分析失敗 ${counts.failed}　已接受 ${counts.accepted}　已寫入 ${counts.written}　已撤銷 ${counts.undone}`;
+      if (!job.snapshot_complete) {
+        const limitNote = document.createElement('p');
+        limitNote.className = 'tag-job-warning';
+        limitNote.textContent = job.error || `候選快照可能未涵蓋所有相符照片（掃描 ${job.scanned_count} 張來源項目）。`;
+        report.append(limitNote);
+      }
+      if (job.status === 'interrupted' || job.status === 'needs_attention' || job.status === 'partially_undone') {
+        const note = document.createElement('p');
+        note.className = 'tag-job-warning';
+        note.textContent = job.error || '請逐張查看狀態；不確定的寫入不會自動重試。';
+        report.append(note);
+      }
+      const actions = document.getElementById('tag-job-actions');
+      actions.replaceChildren();
+      const addAction = (label, kind, handler, disabled = false) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = kind === 'primary' ? 'primary-button' : 'secondary-button';
+        button.textContent = label;
+        button.disabled = disabled;
+        button.addEventListener('click', handler);
+        actions.append(button);
+      };
+      if (job.status === 'ready' || job.status === 'review' || job.status === 'failed' || job.status === 'interrupted') {
+        addAction('分析尚未完成的照片', 'primary', async () => {
+          try {
+            await tagJobRequest(`/api/tag-jobs/${encodeURIComponent(job.id)}/analyze`, {method: 'POST'});
+            setTagJobNotice('分析工作已排入佇列。');
+            startTagJobPolling(job.id);
+          } catch (error) { setTagJobNotice(error.message, true); }
+        }, job.status === 'empty');
+      }
+      if (counts.failed > 0 && !['preparing', 'analyzing', 'writing', 'undoing'].includes(job.status)) {
+        addAction('安全重跑失敗項目', 'secondary', async () => {
+          try {
+            await tagJobRequest(`/api/tag-jobs/${encodeURIComponent(job.id)}/rerun-failed`, {method: 'POST'});
+            setTagJobNotice('已重排失敗的分析項目；成功項目與所有 Photos 寫入狀態不變。');
+            startTagJobPolling(job.id);
+          } catch (error) { setTagJobNotice(error.message, true); }
+        });
+      }
+      const acceptedUnwritten = items.filter(item => item.review === 'accepted' && item.status === 'analyzed').length;
+      if (acceptedUnwritten > 0 && !['preparing', 'analyzing', 'writing', 'undoing', 'written'].includes(job.status)) {
+        const impact = document.createElement('p');
+        impact.className = 'tag-job-warning';
+        const acceptedTags = [...new Set(items.filter(item => item.review === 'accepted' && item.status === 'analyzed').map(item => item.reviewed_tag || '購物'))];
+        impact.textContent = `你已接受 ${acceptedUnwritten} 張照片，將寫入標籤：${acceptedTags.join('、')}。按鈕本身就是確認，不會再跳出彈窗；Synology Photos 可能改寫原始檔。`;
+        actions.append(impact);
+        addAction('寫入已接受項目', 'primary', async event => {
+          event.currentTarget.disabled = true;
+          try {
+            await tagJobRequest(`/api/tag-jobs/${encodeURIComponent(job.id)}/write`, {
+              method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({confirmed: true}),
+            });
+            setTagJobNotice(`已開始寫入 ${acceptedUnwritten} 張照片並逐張核對。`);
+            startTagJobPolling(job.id);
+          } catch (error) { setTagJobNotice(error.message, true); event.currentTarget.disabled = false; }
+        });
+      }
+      if (counts.written > counts.undone && !['preparing', 'analyzing', 'writing', 'undoing', 'undone'].includes(job.status)) {
+        addAction('撤銷此工作新增的標籤', 'secondary', async event => {
+          event.currentTarget.disabled = true;
+          try {
+            await tagJobRequest(`/api/tag-jobs/${encodeURIComponent(job.id)}/undo`, {
+              method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({confirmed: true}),
+            });
+            setTagJobNotice('已開始逐張撤銷此工作新增的標籤。');
+            startTagJobPolling(job.id);
+          } catch (error) { setTagJobNotice(error.message, true); event.currentTarget.disabled = false; }
+        });
+      }
+      addAction('下載工作報告 JSON', 'secondary', async () => {
+        try {
+          const response = await fetch(`/api/tag-jobs/${encodeURIComponent(job.id)}/report`);
+          const body = await response.blob();
+          if (!response.ok) throw new Error('下載報告失敗。');
+          const link = document.createElement('a');
+          link.href = URL.createObjectURL(body);
+          link.download = `photo-tag-job-${job.id.slice(0, 8)}.json`;
+          link.click();
+          URL.revokeObjectURL(link.href);
+        } catch (error) { setTagJobNotice(error.message, true); }
+      });
+      renderTagJobItems(job, items);
+      if (['preparing', 'analyzing', 'writing', 'undoing'].includes(job.status)) startTagJobPolling(job.id);
+    }
+
+    async function openTagJob(jobId) {
+      try {
+        const payload = await tagJobRequest(`/api/tag-jobs/${encodeURIComponent(jobId)}`);
+        renderTagJob(payload);
+        document.getElementById('tag-job-detail').scrollIntoView({behavior: 'smooth', block: 'start'});
+        loadTagJobs();
+      } catch (error) { setTagJobNotice(error.message, true); }
+    }
+
+    document.getElementById('create-tag-job')?.addEventListener('click', async event => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      try {
+        const payload = await tagJobRequest('/api/tag-jobs', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            space: document.getElementById('space-select').value,
+            country: document.getElementById('country-select').value,
+            tag: document.getElementById('tag-select').value,
+            task: 'shopping',
+            max_candidates: Number(document.getElementById('tag-job-limit').value),
+          }),
+        });
+        setTagJobNotice('工作已建立，正在固定符合條件的照片快照…');
+        await loadTagJobs();
+        await openTagJob(payload.job_id);
+        startTagJobPolling(payload.job_id);
+      } catch (error) { setTagJobNotice(error.message, true); }
+      finally { button.disabled = false; }
+    });
+    document.getElementById('close-tag-job')?.addEventListener('click', () => {
+      activeTagJobId = null;
+      document.getElementById('tag-job-detail').hidden = true;
+      loadTagJobs();
+    });
+
     button?.addEventListener('click', async () => {
       button.disabled = true;
       button.classList.add('loading');
@@ -890,8 +1226,10 @@
         loginForm.hidden = true;
         loggedInRow.hidden = false;
         photoBrowser.hidden = false;
+        document.getElementById('tag-job-workspace').hidden = false;
         resetPhotoTags();
         await loadPhotos(0);
+        await loadTagJobs();
       } catch (error) {
         showAuthResult('無法完成登入，請確認服務與 NAS 連線。', 'error');
       } finally {
@@ -907,6 +1245,9 @@
       loggedInRow.hidden = true;
       loginForm.hidden = false;
       photoBrowser.hidden = true;
+      document.getElementById('tag-job-workspace').hidden = true;
+      if (tagJobPollTimer) window.clearInterval(tagJobPollTimer);
+      tagJobPollTimer = null;
       resetPhotoTags();
       showAuthResult('已登出 Synology Photos。', 'success');
     });
@@ -935,7 +1276,12 @@
     document.getElementById('next-page')?.addEventListener('click', () => {
       loadPhotos(photoOffset + Number(document.getElementById('limit-select').value));
     });
-    if (!loginForm.hidden) photoBrowser.hidden = true;
+    if (!loginForm.hidden) {
+      photoBrowser.hidden = true;
+      document.getElementById('tag-job-workspace').hidden = true;
+    } else {
+      loadTagJobs();
+    }
   </script>
 </body>
 </html>

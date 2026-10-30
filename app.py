@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import importlib.metadata
+import hashlib
 import io
 import json
 import os
 import secrets
+import sqlite3
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 import requests
 from flask import Flask, Response, copy_current_request_context, jsonify, render_template, request, session
@@ -32,7 +35,10 @@ API_INFO_PARAMS = {
 API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.3.20")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.4.0")
+TAGGER_DB_PATH = os.environ.get(
+    "TAGGER_DB_PATH", os.path.join(os.path.dirname(__file__), "data", "photo-tagger.sqlite3")
+)
 MLX_SERVER_URL = os.environ.get(
     "MLX_SERVER_URL", "http://mac-mini.tail28f10.ts.net:5001"
 ).strip().rstrip("/")
@@ -45,6 +51,9 @@ MAX_PHOTO_ANALYSIS_BYTES = 30 * 1024 * 1024
 PHOTO_ANALYSIS_PROMPT = """請用繁體中文客觀分析照片，並且只輸出一個合法 JSON 物件，不要加 Markdown 或其他文字：
 {"description":"一至兩句簡潔、只描述畫面可見事實的內容","tags":["0 至 8 個適合搜尋的短標籤"]}
 標籤只根據可見內容；優先沿用提供的 Synology Photos 現有標籤，必須逐字使用清單中的標準寫法。只有當清單中沒有能準確描述畫面的標籤時，才提出簡潔、可重複使用的新標籤。不要為了湊數硬加標籤，也不要因標籤使用次數較多就提高其優先度。若照片明確呈現購物情境才加入「購物」。不要推測人物身分、健康、年齡等敏感特徵；不確定時省略。人物標籤只能使用本張照片 Synology Photos metadata 已確認的人名，不得自行辨認或猜測姓名。"""
+SHOPPING_JOB_PROMPT = """請用繁體中文分析照片是否有明確的購物情境，並且只輸出一個合法 JSON 物件，不要加 Markdown 或其他文字：
+{"task_relevant":true,"confidence":0.92,"evidence":["商店貨架","商品標價"],"description":"簡短描述照片中可見的購物證據","tags":["購物"]}
+task_relevant 必須是 true 或 false；confidence 為 0 至 1 的數字。只有畫面有可見商店、選購商品、購物袋、收據或明確購物活動時才判 true。餐廳用餐、一般街景、只有人物或無法判斷時判 false。evidence 只列最多 6 個可見線索，不得推測。若判 false，tags 請回傳空陣列；若判 true，tags 僅使用「購物」。description 只寫畫面可見內容，不猜人物身份。"""
 
 
 
@@ -90,6 +99,93 @@ _photo_analysis_executor = ThreadPoolExecutor(
     max_workers=PHOTO_ANALYSIS_MAX_CONCURRENT_JOBS,
     thread_name_prefix="photo-analysis",
 )
+TAG_JOB_MAX_CANDIDATES = 300
+TAG_JOB_MAX_SCAN_PAGES = 40
+TAG_JOB_MAX_RUNNING = 4
+_tag_job_submit_lock = threading.Lock()
+
+
+@contextmanager
+def tag_job_db():
+    os.makedirs(os.path.dirname(os.path.abspath(TAGGER_DB_PATH)), mode=0o700, exist_ok=True)
+    connection = sqlite3.connect(TAGGER_DB_PATH, timeout=30)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys = ON")
+    try:
+        yield connection
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def initialize_tag_job_db() -> None:
+    with tag_job_db() as db:
+        db.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS tag_jobs (
+                id TEXT PRIMARY KEY,
+                owner_key TEXT NOT NULL,
+                space TEXT NOT NULL,
+                task TEXT NOT NULL,
+                criteria_json TEXT NOT NULL,
+                status TEXT NOT NULL,
+                snapshot_complete INTEGER NOT NULL DEFAULT 0,
+                candidate_count INTEGER NOT NULL DEFAULT 0,
+                scanned_count INTEGER NOT NULL DEFAULT 0,
+                error TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS tag_jobs_owner_created
+                ON tag_jobs(owner_key, created_at DESC);
+            CREATE TABLE IF NOT EXISTS tag_job_items (
+                job_id TEXT NOT NULL REFERENCES tag_jobs(id) ON DELETE CASCADE,
+                photo_id INTEGER NOT NULL,
+                photo_json TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                review TEXT NOT NULL DEFAULT 'pending',
+                reviewed_tag TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                analysis_json TEXT,
+                write_json TEXT,
+                undo_status TEXT,
+                error TEXT,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY(job_id, photo_id)
+            );
+            CREATE INDEX IF NOT EXISTS tag_job_items_status
+                ON tag_job_items(job_id, status, review);
+            """
+        )
+        item_columns = {row["name"] for row in db.execute("PRAGMA table_info(tag_job_items)").fetchall()}
+        if "reviewed_tag" not in item_columns:
+            db.execute("ALTER TABLE tag_job_items ADD COLUMN reviewed_tag TEXT")
+        # A container restart must never silently resume a mutating operation.
+        db.execute(
+            "UPDATE tag_jobs SET status='interrupted', error='服務重新啟動；請檢查項目狀態後再繼續。', updated_at=? "
+            "WHERE status IN ('preparing','analyzing','writing','undoing')",
+            (time.time(),),
+        )
+        db.execute(
+            "UPDATE tag_job_items SET status='write_uncertain', error='寫入期間服務重新啟動，請先讀回照片核對。', updated_at=? "
+            "WHERE status='writing'",
+            (time.time(),),
+        )
+        db.execute(
+            "UPDATE tag_job_items SET status='failed', error='分析期間服務重新啟動，請安全重跑。', updated_at=? "
+            "WHERE status IN ('queued','running')",
+            (time.time(),),
+        )
+    try:
+        os.chmod(TAGGER_DB_PATH, 0o600)
+    except OSError:
+        app.logger.warning("Could not set restrictive permissions on the job database file")
+
+
+initialize_tag_job_db()
 
 
 class SynologyApiError(Exception):
@@ -417,6 +513,9 @@ def parse_photo_analysis(output: str) -> dict | None:
     return {
         "description": description.strip()[:1000] if isinstance(description, str) else "",
         "tags": tags,
+        "task_relevant": parsed.get("task_relevant") is True,
+        "confidence": parsed.get("confidence"),
+        "evidence": parsed.get("evidence", []) if isinstance(parsed.get("evidence"), list) else [],
     }
 
 
@@ -658,6 +757,7 @@ def login():
             )
         session.clear()
         session["nas_session_token"] = token
+        session["nas_account"] = username
         return jsonify({"ok": True, "message": "NAS 登入成功。"})
     except SynologyApiError as exc:
         if client:
@@ -668,6 +768,7 @@ def login():
 @app.post("/api/logout")
 def logout():
     token = session.pop("nas_session_token", None)
+    session.pop("nas_account", None)
     if token:
         with _japan_searches_lock:
             _japan_searches.pop((token, "personal"), None)
@@ -968,6 +1069,571 @@ def list_photo_tags():
         except SynologyApiError as fallback_exc:
             status = 502 if fallback_exc.error_code is None else 403
             return jsonify({"ok": False, "error": str(fallback_exc), "error_code": fallback_exc.error_code}), status
+
+
+def tag_job_owner_key() -> str | None:
+    account = session.get("nas_account")
+    if not isinstance(account, str) or not account.strip():
+        return None
+    stable_name = f"{configured_base_url().casefold()}|{account.casefold()}".encode()
+    return hashlib.sha256(stable_name).hexdigest()
+
+
+def tag_job_summary(db: sqlite3.Connection, job: sqlite3.Row) -> dict:
+    counts = {
+        "candidates": job["candidate_count"], "analyzed": 0, "failed": 0,
+        "accepted": 0, "rejected": 0, "written": 0, "undone": 0,
+    }
+    rows = db.execute(
+        "SELECT status, review, undo_status, COUNT(*) AS n FROM tag_job_items "
+        "WHERE job_id=? GROUP BY status, review, undo_status", (job["id"],),
+    ).fetchall()
+    for row in rows:
+        if row["status"] == "analyzed":
+            counts["analyzed"] += row["n"]
+        if row["status"] in {"failed", "write_uncertain"}:
+            counts["failed"] += row["n"]
+        if row["review"] == "accepted":
+            counts["accepted"] += row["n"]
+        if row["review"] == "rejected":
+            counts["rejected"] += row["n"]
+        if row["status"] == "written":
+            counts["written"] += row["n"]
+        if row["undo_status"] == "undone":
+            counts["undone"] += row["n"]
+    return {
+        "id": job["id"], "space": job["space"], "task": job["task"],
+        "criteria": json.loads(job["criteria_json"]), "status": job["status"],
+        "snapshot_complete": bool(job["snapshot_complete"]),
+        "scanned_count": job["scanned_count"], "error": job["error"],
+        "created_at": job["created_at"], "updated_at": job["updated_at"],
+        "counts": counts,
+    }
+
+
+def get_tag_job(db: sqlite3.Connection, owner_key: str, job_id: str) -> sqlite3.Row | None:
+    return db.execute(
+        "SELECT * FROM tag_jobs WHERE id=? AND owner_key=?", (job_id, owner_key)
+    ).fetchone()
+
+
+def tag_job_detail_payload(db: sqlite3.Connection, owner_key: str, job_id: str) -> dict | None:
+    job = get_tag_job(db, owner_key, job_id)
+    if job is None:
+        return None
+    items = []
+    for row in db.execute(
+        "SELECT * FROM tag_job_items WHERE job_id=? ORDER BY photo_id", (job_id,)
+    ).fetchall():
+        items.append({
+            "photo": json.loads(row["photo_json"]),
+            "status": row["status"], "review": row["review"],
+            "reviewed_tag": row["reviewed_tag"],
+            "attempts": row["attempts"],
+            "analysis": json.loads(row["analysis_json"]) if row["analysis_json"] else None,
+            "write": json.loads(row["write_json"]) if row["write_json"] else None,
+            "undo_status": row["undo_status"], "error": row["error"],
+        })
+    return {"job": tag_job_summary(db, job), "items": items}
+
+
+def matching_job_photos(index: PhotoLibraryIndex, country: str, tag_filter: str) -> list[dict]:
+    matches = []
+    for photo in index.photos:
+        if country == "japan" and not is_japan(photo):
+            continue
+        tags = [str(tag) for tag in photo.get("tags", [])]
+        if tag_filter == "__untagged__" and tags:
+            continue
+        if tag_filter and tag_filter != "__untagged__" and tag_filter not in tags:
+            continue
+        matches.append(photo)
+    return matches
+
+
+def prepare_tag_job(job_id: str, owner_key: str, nas_token: str, space: str, country: str, tag_filter: str, max_candidates: int) -> None:
+    try:
+        with app.test_request_context("/"):
+            session["nas_session_token"] = nas_token
+            nas = current_nas_session()
+            if not nas:
+                raise SynologyApiError("登入工作階段已失效；請重新登入並安全重跑工作。")
+            api_name = "SYNO.Foto.Browse.Item" if space == "personal" else "SYNO.FotoTeam.Browse.Item"
+            url, version = api_endpoint(nas, api_name)
+            index = photo_library_index(nas_token, space)
+            for _ in range(TAG_JOB_MAX_SCAN_PAGES):
+                matches = matching_job_photos(index, country, tag_filter)
+                if index.complete or len(matches) > max_candidates:
+                    break
+                scan_photo_library_page(nas, api_name, url, version, index)
+                with tag_job_db() as db:
+                    db.execute(
+                        "UPDATE tag_jobs SET scanned_count=?, updated_at=? WHERE id=? AND owner_key=?",
+                        (index.source_offset, time.time(), job_id, owner_key),
+                    )
+            matches = matching_job_photos(index, country, tag_filter)
+            selected = matches[:max_candidates]
+            truncated = len(matches) > max_candidates or not index.complete
+            snapshot_fields = (
+                "id", "filename", "thumbnail_ready", "thumbnail_cache_key",
+                "thumbnail_unit_id", "thumbnail_size", "taken_at", "time", "tags",
+            )
+            with tag_job_db() as db:
+                db.executemany(
+                    "INSERT OR IGNORE INTO tag_job_items(job_id, photo_id, photo_json, updated_at) VALUES(?,?,?,?)",
+                    [
+                        (job_id, int(photo["id"]), json.dumps(
+                            {key: photo[key] for key in snapshot_fields if key in photo}, ensure_ascii=False
+                        ), time.time())
+                        for photo in selected if isinstance(photo.get("id"), int)
+                    ],
+                )
+                db.execute(
+                    "UPDATE tag_jobs SET candidate_count=?, snapshot_complete=?, scanned_count=?, status=?, error=?, updated_at=? "
+                    "WHERE id=? AND owner_key=?",
+                    (len(selected), int(not truncated), index.source_offset,
+                     "ready" if selected else "empty",
+                     "候選範圍已達掃描上限；此工作快照可能不含全部符合照片。" if truncated else None,
+                     time.time(), job_id, owner_key),
+                )
+    except Exception as exc:
+        app.logger.exception("Could not prepare AI tagging job %s", job_id)
+        with tag_job_db() as db:
+            db.execute(
+                "UPDATE tag_jobs SET status='failed', error=?, updated_at=? WHERE id=? AND owner_key=?",
+                (str(exc)[:500], time.time(), job_id, owner_key),
+            )
+
+
+@app.get("/api/tag-jobs")
+def list_tag_jobs():
+    if not current_nas_session():
+        return jsonify({"ok": False, "error": "請先登入 Synology Photos。"}), 401
+    owner_key = tag_job_owner_key()
+    if not owner_key:
+        return jsonify({"ok": False, "error": "登入資料不完整，請重新登入。"}), 401
+    with tag_job_db() as db:
+        jobs = db.execute(
+            "SELECT * FROM tag_jobs WHERE owner_key=? ORDER BY created_at DESC LIMIT 50", (owner_key,)
+        ).fetchall()
+        return jsonify({"ok": True, "jobs": [tag_job_summary(db, job) for job in jobs]})
+
+
+@app.post("/api/tag-jobs")
+def create_tag_job():
+    nas = current_nas_session()
+    if not nas:
+        return jsonify({"ok": False, "error": "請先登入 Synology Photos。"}), 401
+    owner_key = tag_job_owner_key()
+    if not owner_key:
+        return jsonify({"ok": False, "error": "登入資料不完整，請重新登入。"}), 401
+    body = request.get_json(silent=True) or {}
+    space = body.get("space", "personal")
+    country = body.get("country", "japan")
+    tag_filter = body.get("tag", "")
+    task = body.get("task", "shopping")
+    try:
+        max_candidates = int(body.get("max_candidates", 100))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "候選照片上限格式無效。"}), 400
+    if not isinstance(space, str) or space not in {"personal", "shared"} or not isinstance(country, str) or country not in {"", "japan"}:
+        return jsonify({"ok": False, "error": "目前只支援個人／共享空間及日本地點篩選。"}), 400
+    if not isinstance(tag_filter, str) or len(tag_filter) > 64:
+        return jsonify({"ok": False, "error": "標籤條件格式無效。"}), 400
+    if not country and not tag_filter:
+        return jsonify({"ok": False, "error": "請至少指定日本地點或既有標籤，避免掃描整個相片庫。"}), 400
+    if task != "shopping":
+        return jsonify({"ok": False, "error": "目前 AI 標記工作只支援『購物』任務。"}), 400
+    if max_candidates < 1 or max_candidates > TAG_JOB_MAX_CANDIDATES:
+        return jsonify({"ok": False, "error": f"每個工作最多選取 {TAG_JOB_MAX_CANDIDATES} 張照片。"}), 400
+    with tag_job_db() as db:
+        running = db.execute(
+            "SELECT COUNT(*) FROM tag_jobs WHERE owner_key=? AND status IN ('preparing','analyzing','writing','undoing')",
+            (owner_key,),
+        ).fetchone()[0]
+        if running >= TAG_JOB_MAX_RUNNING:
+            return jsonify({"ok": False, "error": "目前已有 4 個標記工作在處理，請等候完成。"}), 429
+        job_id = uuid.uuid4().hex
+        now = time.time()
+        criteria = {"country": country, "tag": tag_filter, "max_candidates": max_candidates}
+        db.execute(
+            "INSERT INTO tag_jobs(id, owner_key, space, task, criteria_json, status, created_at, updated_at) "
+            "VALUES(?,?,?,?,?,'preparing',?,?)",
+            (job_id, owner_key, space, task, json.dumps(criteria, ensure_ascii=False), now, now),
+        )
+    try:
+        _photo_analysis_executor.submit(
+            prepare_tag_job, job_id, owner_key, session.get("nas_session_token"),
+            space, country, tag_filter, max_candidates,
+        )
+    except Exception:
+        with tag_job_db() as db:
+            db.execute("UPDATE tag_jobs SET status='failed', error='無法啟動工作。', updated_at=? WHERE id=?", (time.time(), job_id))
+        return jsonify({"ok": False, "error": "無法啟動標記工作。"}), 503
+    return jsonify({"ok": True, "job_id": job_id, "status": "preparing"}), 202
+
+
+@app.get("/api/tag-jobs/<job_id>")
+def get_tag_job_detail(job_id: str):
+    if not current_nas_session():
+        return jsonify({"ok": False, "error": "請先登入 Synology Photos。"}), 401
+    if len(job_id) != 32 or any(char not in "0123456789abcdef" for char in job_id):
+        return jsonify({"ok": False, "error": "工作識別碼格式無效。"}), 400
+    with tag_job_db() as db:
+        detail = tag_job_detail_payload(db, tag_job_owner_key() or "", job_id)
+    if detail is None:
+        return jsonify({"ok": False, "error": "找不到此標記工作。"}), 404
+    return jsonify({"ok": True, **detail})
+
+
+def queue_tag_job_analysis(job_id: str, owner_key: str, nas_token: str) -> tuple[bool, str | None]:
+    with _tag_job_submit_lock, tag_job_db() as db:
+        job = get_tag_job(db, owner_key, job_id)
+        if not job:
+            return False, "找不到此標記工作。"
+        if job["status"] in {"preparing", "analyzing", "writing", "undoing"}:
+            return False, "此工作目前正在處理中。"
+        items = db.execute(
+            "SELECT COUNT(*) FROM tag_job_items WHERE job_id=? AND status IN ('pending','failed')", (job_id,)
+        ).fetchone()[0]
+        if not items:
+            return False, "沒有待分析或可安全重跑的照片。"
+        db.execute(
+            "UPDATE tag_job_items SET status='queued', review='pending', error=NULL, updated_at=? "
+            "WHERE job_id=? AND status IN ('pending','failed')", (time.time(), job_id),
+        )
+        db.execute("UPDATE tag_jobs SET status='analyzing', error=NULL, updated_at=? WHERE id=?", (time.time(), job_id))
+        try:
+            _photo_analysis_executor.submit(run_tag_job_analysis, job_id, owner_key, nas_token)
+        except Exception:
+            db.execute("UPDATE tag_job_items SET status='pending', updated_at=? WHERE job_id=? AND status='queued'", (time.time(), job_id))
+            db.execute("UPDATE tag_jobs SET status='failed', error='無法啟動分析。', updated_at=? WHERE id=?", (time.time(), job_id))
+            return False, "無法啟動分析工作。"
+    return True, None
+
+
+def run_tag_job_analysis(job_id: str, owner_key: str, nas_token: str) -> None:
+    try:
+        with tag_job_db() as db:
+            job = get_tag_job(db, owner_key, job_id)
+            if not job:
+                return
+            space = job["space"]
+            rows = db.execute(
+                "SELECT * FROM tag_job_items WHERE job_id=? AND status='queued' ORDER BY photo_id", (job_id,)
+            ).fetchall()
+        for row in rows:
+            photo = json.loads(row["photo_json"])
+            photo_id = int(row["photo_id"])
+            with tag_job_db() as db:
+                db.execute(
+                    "UPDATE tag_job_items SET status='running', attempts=attempts+1, error=NULL, updated_at=? WHERE job_id=? AND photo_id=?",
+                    (time.time(), job_id, photo_id),
+                )
+            query = urlencode({
+                "space": space, "task": "shopping",
+                "cache_key": photo.get("thumbnail_cache_key") or "",
+                "unit_id": photo.get("thumbnail_unit_id") or photo_id,
+            })
+            with app.test_request_context(f"/api/photos/{photo_id}/analyze?{query}"):
+                session["nas_session_token"] = nas_token
+                response = _perform_photo_analysis(photo_id)
+            response_object, status_code = response if isinstance(response, tuple) else (response, 200)
+            payload = response_object.get_json(silent=True) if isinstance(response_object, Response) else None
+            if not isinstance(payload, dict) or not payload.get("ok") or status_code >= 400:
+                error = payload.get("error", "分析失敗。") if isinstance(payload, dict) else "分析服務回應無效。"
+                with tag_job_db() as db:
+                    db.execute(
+                        "UPDATE tag_job_items SET status='failed', error=?, updated_at=? WHERE job_id=? AND photo_id=?",
+                        (str(error)[:500], time.time(), job_id, photo_id),
+                    )
+                continue
+            analysis = payload.get("analysis") if isinstance(payload.get("analysis"), dict) else {}
+            confidence = analysis.get("confidence")
+            try:
+                confidence = max(0.0, min(1.0, float(confidence)))
+            except (TypeError, ValueError):
+                confidence = 0.0
+            safe_result = {
+                "task_relevant": analysis.get("task_relevant") is True,
+                "confidence": confidence,
+                "evidence": [str(value)[:200] for value in analysis.get("evidence", [])[:6]]
+                    if isinstance(analysis.get("evidence"), list) else [],
+                "description": str(analysis.get("description") or "")[:1000],
+                "model": payload.get("model"),
+                "elapsed_s": payload.get("elapsed_s"),
+                "format": payload.get("format"),
+            }
+            recommendation = "review" if safe_result["task_relevant"] and confidence >= 0.60 else "skip"
+            with tag_job_db() as db:
+                db.execute(
+                    "UPDATE tag_job_items SET status='analyzed', review=?, reviewed_tag=?, analysis_json=?, error=NULL, updated_at=? WHERE job_id=? AND photo_id=?",
+                    (recommendation, "購物" if recommendation == "review" else None,
+                     json.dumps(safe_result, ensure_ascii=False), time.time(), job_id, photo_id),
+                )
+        with tag_job_db() as db:
+            counts = db.execute(
+                "SELECT SUM(status='queued') AS queued, SUM(status='running') AS running, SUM(status='failed') AS failed "
+                "FROM tag_job_items WHERE job_id=?", (job_id,),
+            ).fetchone()
+            status = "review" if not (counts["queued"] or counts["running"]) else "analyzing"
+            error = "部分照片分析失敗；可安全重跑失敗項目。" if counts["failed"] else None
+            db.execute("UPDATE tag_jobs SET status=?, error=?, updated_at=? WHERE id=?", (status, error, time.time(), job_id))
+    except Exception:
+        app.logger.exception("AI tagging job analysis failed: %s", job_id)
+        with tag_job_db() as db:
+            db.execute(
+                "UPDATE tag_job_items SET status='failed', error='分析期間工作中斷；可安全重跑。', updated_at=? "
+                "WHERE job_id=? AND status IN ('queued','running')",
+                (time.time(), job_id),
+            )
+            db.execute("UPDATE tag_jobs SET status='failed', error='工作分析發生未預期錯誤。', updated_at=? WHERE id=?", (time.time(), job_id))
+
+
+@app.post("/api/tag-jobs/<job_id>/analyze")
+def analyze_tag_job(job_id: str):
+    if not current_nas_session():
+        return jsonify({"ok": False, "error": "請先登入 Synology Photos。"}), 401
+    if not MLX_SERVER_API_KEY:
+        return jsonify({"ok": False, "error": "尚未設定本機 MLX API key。"}), 503
+    if len(job_id) != 32 or any(char not in "0123456789abcdef" for char in job_id):
+        return jsonify({"ok": False, "error": "工作識別碼格式無效。"}), 400
+    ok, error = queue_tag_job_analysis(job_id, tag_job_owner_key() or "", session.get("nas_session_token"))
+    return (jsonify({"ok": ok, "error": error, "status": "analyzing" if ok else None}), 202 if ok else 409)
+
+
+@app.post("/api/tag-jobs/<job_id>/rerun-failed")
+def rerun_failed_tag_job_items(job_id: str):
+    if not current_nas_session():
+        return jsonify({"ok": False, "error": "請先登入 Synology Photos。"}), 401
+    if not MLX_SERVER_API_KEY:
+        return jsonify({"ok": False, "error": "尚未設定本機 MLX API key。"}), 503
+    owner_key = tag_job_owner_key() or ""
+    with tag_job_db() as db:
+        job = get_tag_job(db, owner_key, job_id)
+        if not job:
+            return jsonify({"ok": False, "error": "找不到此標記工作。"}), 404
+        if job["status"] in {"preparing", "analyzing", "writing", "undoing"}:
+            return jsonify({"ok": False, "error": "工作仍在處理中。"}), 409
+        retryable = db.execute(
+            "SELECT COUNT(*) FROM tag_job_items WHERE job_id=? AND status='failed'", (job_id,)
+        ).fetchone()[0]
+        if retryable:
+            db.execute(
+                "UPDATE tag_job_items SET status='pending', review='pending', error=NULL, updated_at=? "
+                "WHERE job_id=? AND status='failed'", (time.time(), job_id),
+            )
+    ok, error = queue_tag_job_analysis(job_id, owner_key, session.get("nas_session_token"))
+    return (jsonify({"ok": ok, "error": error, "status": "analyzing" if ok else None}), 202 if ok else 409)
+
+
+@app.post("/api/tag-jobs/<job_id>/items/<int:photo_id>/review")
+def review_tag_job_item(job_id: str, photo_id: int):
+    if not current_nas_session():
+        return jsonify({"ok": False, "error": "請先登入 Synology Photos。"}), 401
+    body = request.get_json(silent=True) or {}
+    decision = body.get("decision")
+    if decision not in {"accepted", "rejected", "pending"}:
+        return jsonify({"ok": False, "error": "複核狀態無效。"}), 400
+    owner_key = tag_job_owner_key() or ""
+    nas = current_nas_session()
+    with tag_job_db() as db:
+        job = get_tag_job(db, owner_key, job_id)
+        item = db.execute("SELECT status FROM tag_job_items WHERE job_id=? AND photo_id=?", (job_id, photo_id)).fetchone() if job else None
+        if not item:
+            return jsonify({"ok": False, "error": "找不到此照片或工作。"}), 404
+        if item["status"] != "analyzed":
+            return jsonify({"ok": False, "error": "請先完成此照片的分析。"}), 409
+        space = job["space"]
+    reviewed_tag = body.get("tag", "購物") if decision == "accepted" else None
+    if decision == "accepted":
+        if not isinstance(reviewed_tag, str) or not reviewed_tag.strip() or len(reviewed_tag.strip()) > 64:
+            return jsonify({"ok": False, "error": "請選擇有效的標籤。"}), 400
+        reviewed_tag = reviewed_tag.strip()
+        allowed_tags = {"購物", *photo_tag_vocabulary(nas, space)}
+        if reviewed_tag not in allowed_tags:
+            return jsonify({"ok": False, "error": "只能使用「購物」或目前空間中已存在的標籤；請重新載入標籤清單。"}), 400
+    with tag_job_db() as db:
+        job = get_tag_job(db, owner_key, job_id)
+        item = db.execute("SELECT status FROM tag_job_items WHERE job_id=? AND photo_id=?", (job_id, photo_id)).fetchone() if job else None
+        if not item:
+            return jsonify({"ok": False, "error": "找不到此照片或工作。"}), 404
+        if item["status"] != "analyzed":
+            return jsonify({"ok": False, "error": "請先完成此照片的分析。"}), 409
+        db.execute("UPDATE tag_job_items SET review=?, reviewed_tag=?, updated_at=? WHERE job_id=? AND photo_id=?", (decision, reviewed_tag, time.time(), job_id, photo_id))
+        db.execute("UPDATE tag_jobs SET status='review', updated_at=? WHERE id=?", (time.time(), job_id))
+    return jsonify({"ok": True, "decision": decision, "tag": reviewed_tag})
+
+
+def call_job_write_route(nas_token: str, space: str, photo_id: int, tag_name: str) -> dict:
+    with app.test_request_context(
+        f"/api/photos/{photo_id}/write-analysis?{urlencode({'space': space})}",
+        method="POST", json={"confirmed": True, "description": "", "tags": [tag_name]},
+    ):
+        session["nas_session_token"] = nas_token
+        response = write_photo_analysis(photo_id)
+    response_object, status_code = response if isinstance(response, tuple) else (response, 200)
+    result = response_object.get_json(silent=True) if isinstance(response_object, Response) else {}
+    return {**(result if isinstance(result, dict) else {}), "http_status": status_code}
+
+
+def run_tag_job_write(job_id: str, owner_key: str, nas_token: str) -> None:
+    try:
+        with tag_job_db() as db:
+            job = get_tag_job(db, owner_key, job_id)
+            if not job:
+                return
+            space = job["space"]
+            rows = db.execute(
+                "SELECT * FROM tag_job_items WHERE job_id=? AND review='accepted' AND status='analyzed' ORDER BY photo_id",
+                (job_id,),
+            ).fetchall()
+        for row in rows:
+            photo_id = int(row["photo_id"])
+            with tag_job_db() as db:
+                db.execute("UPDATE tag_job_items SET status='writing', error=NULL, updated_at=? WHERE job_id=? AND photo_id=?", (time.time(), job_id, photo_id))
+            result = call_job_write_route(nas_token, space, photo_id, row["reviewed_tag"] or "購物")
+            safe_write = {
+                "ok": result.get("ok") is True,
+                "tags_added": result.get("tags_added", []),
+                "tags_added_ids": result.get("tags_added_ids", []),
+                "tags_already_present": result.get("tags_already_present", []),
+                "tags_api_succeeded": result.get("tags_api_succeeded") is True,
+                "tags_verified": result.get("tags_verified") is True,
+                "http_status": result.get("http_status"),
+                "error": result.get("error") or result.get("tags_error") or result.get("readback_error"),
+            }
+            # A failed write response can still follow a successful remote mutation.
+            # Keep it out of the automatic retry path until the user inspects Photos.
+            state = "written" if safe_write["ok"] else "write_uncertain"
+            with tag_job_db() as db:
+                db.execute(
+                    "UPDATE tag_job_items SET status=?, write_json=?, error=?, updated_at=? WHERE job_id=? AND photo_id=?",
+                    (state, json.dumps(safe_write, ensure_ascii=False), safe_write["error"], time.time(), job_id, photo_id),
+                )
+        with tag_job_db() as db:
+            counts = db.execute("SELECT SUM(status='writing') AS writing, SUM(status='write_uncertain') AS uncertain, SUM(status='failed') AS failed FROM tag_job_items WHERE job_id=?", (job_id,)).fetchone()
+            status = "written" if not (counts["writing"] or counts["uncertain"] or counts["failed"]) else "needs_attention"
+            db.execute("UPDATE tag_jobs SET status=?, updated_at=? WHERE id=?", (status, time.time(), job_id))
+    except Exception:
+        app.logger.exception("AI tagging job write failed: %s", job_id)
+        with tag_job_db() as db:
+            db.execute("UPDATE tag_jobs SET status='needs_attention', error='寫入期間發生錯誤；請查看逐張狀態，勿直接重試不確定項目。', updated_at=? WHERE id=?", (time.time(), job_id))
+
+
+@app.post("/api/tag-jobs/<job_id>/write")
+def write_accepted_tag_job_items(job_id: str):
+    nas = current_nas_session()
+    if not nas:
+        return jsonify({"ok": False, "error": "請先登入 Synology Photos。"}), 401
+    body = request.get_json(silent=True) or {}
+    if body.get("confirmed") is not True:
+        return jsonify({"ok": False, "error": "請由工作頁面明確確認寫入。"}), 400
+    owner_key = tag_job_owner_key() or ""
+    with tag_job_db() as db:
+        job = get_tag_job(db, owner_key, job_id)
+        if not job:
+            return jsonify({"ok": False, "error": "找不到此標記工作。"}), 404
+        if job["status"] in {"preparing", "analyzing", "writing", "undoing"}:
+            return jsonify({"ok": False, "error": "工作仍在處理中。"}), 409
+        accepted = db.execute("SELECT COUNT(*) FROM tag_job_items WHERE job_id=? AND review='accepted' AND status='analyzed'", (job_id,)).fetchone()[0]
+        if not accepted:
+            return jsonify({"ok": False, "error": "沒有已接受且尚未寫入的建議。"}), 409
+        db.execute("UPDATE tag_jobs SET status='writing', error=NULL, updated_at=? WHERE id=?", (time.time(), job_id))
+    _photo_analysis_executor.submit(run_tag_job_write, job_id, owner_key, session.get("nas_session_token"))
+    return jsonify({"ok": True, "status": "writing", "accepted_count": accepted}), 202
+
+
+def run_tag_job_undo(job_id: str, owner_key: str, nas_token: str, space: str) -> None:
+    try:
+        with app.test_request_context("/"):
+            session["nas_session_token"] = nas_token
+            nas = current_nas_session()
+            if not nas:
+                raise SynologyApiError("請重新登入 Synology Photos 後再撤銷。")
+            item_api = "SYNO.Foto.Browse.Item" if space == "personal" else "SYNO.FotoTeam.Browse.Item"
+            item_url, item_version = api_endpoint(nas, item_api)
+            with tag_job_db() as db:
+                rows = db.execute(
+                    "SELECT * FROM tag_job_items WHERE job_id=? AND status='written' "
+                    "AND (undo_status IS NULL OR undo_status NOT IN ('undone','not_needed'))", (job_id,)
+                ).fetchall()
+            for row in rows:
+                photo_id = int(row["photo_id"])
+                write_info = json.loads(row["write_json"] or "{}")
+                tag_ids = write_info.get("tags_added_ids", [])
+                if not tag_ids:
+                    with tag_job_db() as db:
+                        db.execute("UPDATE tag_job_items SET undo_status='not_needed', updated_at=? WHERE job_id=? AND photo_id=?", (time.time(), job_id, photo_id))
+                    continue
+                with tag_job_db() as db:
+                    db.execute("UPDATE tag_job_items SET undo_status='undoing', updated_at=? WHERE job_id=? AND photo_id=?", (time.time(), job_id, photo_id))
+                if tag_ids:
+                    post_synology(nas.client, item_url, {
+                        "api": item_api, "version": 1, "method": "remove_tag",
+                        "id": json.dumps([photo_id], separators=(",", ":")),
+                        "tag": json.dumps(tag_ids, separators=(",", ":")), "_sid": nas.sid,
+                    })
+                check = post_synology(nas.client, item_url, {
+                    "api": item_api, "version": item_version, "method": "get",
+                    "id": json.dumps([photo_id], separators=(",", ":")),
+                    "additional": json.dumps(["tag"], separators=(",", ":")), "_sid": nas.sid,
+                })
+                data = check.get("data")
+                found = data.get("list") if isinstance(data, dict) else None
+                current_names = {
+                    tag.get("name", "").casefold()
+                    for tag in ((found[0].get("additional") or {}).get("tag") or [])
+                    if isinstance(tag, dict) and isinstance(tag.get("name"), str)
+                } if found and isinstance(found[0], dict) else set()
+                added_names = {str(name).casefold() for name in write_info.get("tags_added", [])}
+                remaining = sorted(added_names & current_names)
+                undo_result = {"ok": not remaining, "tags_removed": write_info.get("tags_added", []), "still_present": remaining}
+                with tag_job_db() as db:
+                    db.execute("UPDATE tag_job_items SET undo_status=?, error=?, updated_at=? WHERE job_id=? AND photo_id=?", ("undone" if not remaining else "failed", "；".join(remaining) if remaining else None, time.time(), job_id, photo_id))
+            with tag_job_db() as db:
+                remaining = db.execute("SELECT COUNT(*) FROM tag_job_items WHERE job_id=? AND status='written' AND (undo_status IS NULL OR undo_status NOT IN ('undone','not_needed'))", (job_id,)).fetchone()[0]
+                db.execute("UPDATE tag_jobs SET status=?, updated_at=? WHERE id=?", ("undone" if not remaining else "partially_undone", time.time(), job_id))
+    except Exception:
+        app.logger.exception("Could not undo AI tagging job %s", job_id)
+        with tag_job_db() as db:
+            db.execute("UPDATE tag_jobs SET status='partially_undone', error='部分撤銷失敗；請查看報告與 Synology Photos 現況。', updated_at=? WHERE id=?", (time.time(), job_id))
+
+
+@app.post("/api/tag-jobs/<job_id>/undo")
+def undo_tag_job(job_id: str):
+    nas = current_nas_session()
+    if not nas:
+        return jsonify({"ok": False, "error": "請先登入 Synology Photos。"}), 401
+    if (request.get_json(silent=True) or {}).get("confirmed") is not True:
+        return jsonify({"ok": False, "error": "請由工作頁面明確確認撤銷。"}), 400
+    owner_key = tag_job_owner_key() or ""
+    with tag_job_db() as db:
+        job = get_tag_job(db, owner_key, job_id)
+        if not job:
+            return jsonify({"ok": False, "error": "找不到此標記工作。"}), 404
+        if job["status"] in {"preparing", "analyzing", "writing", "undoing"}:
+            return jsonify({"ok": False, "error": "工作仍在處理中。"}), 409
+        rows = db.execute("SELECT write_json FROM tag_job_items WHERE job_id=? AND status='written' AND (undo_status IS NULL OR undo_status NOT IN ('undone','not_needed'))", (job_id,)).fetchall()
+        count = sum(bool(json.loads(row["write_json"] or "{}").get("tags_added_ids")) for row in rows)
+        if not count:
+            return jsonify({"ok": False, "error": "此工作沒有可撤銷的成功寫入。"}), 409
+        space = job["space"]
+        db.execute("UPDATE tag_jobs SET status='undoing', error=NULL, updated_at=? WHERE id=?", (time.time(), job_id))
+        db.execute("UPDATE tag_job_items SET undo_status='queued' WHERE job_id=? AND status='written' AND undo_status IS NULL AND write_json IS NOT NULL", (job_id,))
+    _photo_analysis_executor.submit(run_tag_job_undo, job_id, owner_key, session.get("nas_session_token"), space)
+    return jsonify({"ok": True, "status": "undoing", "written_count": count}), 202
+
+
+@app.get("/api/tag-jobs/<job_id>/report")
+def download_tag_job_report(job_id: str):
+    if not current_nas_session():
+        return jsonify({"ok": False, "error": "請先登入 Synology Photos。"}), 401
+    with tag_job_db() as db:
+        detail = tag_job_detail_payload(db, tag_job_owner_key() or "", job_id)
+    if detail is None:
+        return jsonify({"ok": False, "error": "找不到此標記工作。"}), 404
+    return jsonify({"generated_at": time.time(), **detail})
 
 
 def photo_tag_vocabulary(nas: NasSession, space: str) -> list[str]:
@@ -1547,7 +2213,7 @@ def _perform_photo_analysis(photo_id: int):
         }), 415
 
     image_format, mime_type, extension = image_type
-    analysis_prompt = PHOTO_ANALYSIS_PROMPT
+    analysis_prompt = SHOPPING_JOB_PROMPT if request.args.get("task") == "shopping" else PHOTO_ANALYSIS_PROMPT
     if known_tags:
         analysis_prompt += "\n目前登入者在此 Synology Photos 空間的既有標籤（只能在符合照片內容時重用，必須逐字使用）：" + "、".join(known_tags) + "。清單中的人名只可在本張照片的已確認人物清單中出現時使用。"
     if known_people:
@@ -1817,6 +2483,16 @@ def write_photo_analysis(photo_id: int):
     description_verified = not description_requested or after_description == clean_description
     verified_tag_names = {name.casefold() for name in after_tag_names}
     tags_verified = all(tag.casefold() in verified_tag_names for tag in clean_tags)
+    after_tag_ids_by_name = {
+        tag["name"].strip().casefold(): tag.get("id")
+        for tag in after_tags_raw
+        if isinstance(tag, dict) and isinstance(tag.get("name"), str)
+    }
+    tags_added_ids = [
+        after_tag_ids_by_name[tag.casefold()]
+        for tag in tags_to_add
+        if tags_succeeded and isinstance(after_tag_ids_by_name.get(tag.casefold()), int)
+    ]
     success = (
         (not description_requested or (description_succeeded and description_verified))
         and tags_succeeded
@@ -1832,6 +2508,7 @@ def write_photo_analysis(photo_id: int):
         "tags_api_succeeded": tags_succeeded,
         "tags_requested": clean_tags,
         "tags_added": tags_to_add if tags_succeeded else [],
+        "tags_added_ids": tags_added_ids,
         "tags_already_present": already_present,
         "tags_verified": tags_verified,
         "description_error": description_error,
