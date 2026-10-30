@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.metadata
+import hashlib
 import io
 import json
 import os
@@ -31,7 +32,7 @@ API_INFO_PARAMS = {
 API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.3.12")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.3.14")
 MLX_SERVER_URL = os.environ.get(
     "MLX_SERVER_URL", "http://mac-mini.tail28f10.ts.net:5001"
 ).strip().rstrip("/")
@@ -41,6 +42,7 @@ MLX_MODEL = os.environ.get("MLX_MODEL", "mlx-gemma4").strip() or "mlx-gemma4"
 MLX_OCR_ENGINE = os.environ.get("MLX_OCR_ENGINE", "baidu").strip().lower() or "baidu"
 MLX_TIMEOUT_SECONDS = max(30, int(os.environ.get("MLX_TIMEOUT_SECONDS", "900")))
 MAX_PHOTO_ANALYSIS_BYTES = 30 * 1024 * 1024
+PHOTO_API_WRITE_TEST_IDS = {82153, 82155}
 PHOTO_ANALYSIS_PROMPT = """請用繁體中文客觀分析照片，並且只輸出一個合法 JSON 物件，不要加 Markdown 或其他文字：
 {"description":"一至兩句簡潔、只描述畫面可見事實的內容","tags":["0 至 8 個適合搜尋的短標籤"]}
 標籤只根據可見內容；優先沿用提供的 Synology Photos 現有標籤，必須逐字使用清單中的標準寫法。只有當清單中沒有能準確描述畫面的標籤時，才提出簡潔、可重複使用的新標籤。不要為了湊數硬加標籤，也不要因標籤使用次數較多就提高其優先度。若照片明確呈現購物情境才加入「購物」。不要推測人物身分、健康、年齡等敏感特徵；不確定時省略。人物標籤只能使用本張照片 Synology Photos metadata 已確認的人名，不得自行辨認或猜測姓名。"""
@@ -1240,6 +1242,189 @@ def photo_original_check(photo_id: int):
     })
 
 
+@app.post("/api/photos/<int:photo_id>/api-write-test")
+def photo_api_write_test(photo_id: int):
+    """Temporarily add/remove a test tag and compare original bytes around the API write."""
+    nas = current_nas_session()
+    if not nas:
+        return jsonify({"ok": False, "error": "請先登入 Synology Photos。"}), 401
+    if photo_id not in PHOTO_API_WRITE_TEST_IDS:
+        return jsonify({"ok": False, "error": "此測試僅開放指定的 JPG 與 HEIC 項目。"}), 403
+    if request.get_json(silent=True, force=True) != {"confirmed": True}:
+        return jsonify({"ok": False, "error": "請先在頁面確認原檔可能被 Photos API 改寫。"}), 400
+    space = request.args.get("space", "personal")
+    if space not in {"personal", "shared"}:
+        return jsonify({"ok": False, "error": "空間類型無效。"}), 400
+
+    expected_format = {82153: "JPEG", 82155: "HEIC/HEIF"}[photo_id]
+    item_api = "SYNO.Foto.Browse.Item" if space == "personal" else "SYNO.FotoTeam.Browse.Item"
+    download_api = "SYNO.Foto.Download" if space == "personal" else "SYNO.FotoTeam.Download"
+    try:
+        item_url, item_version = api_endpoint(nas, item_api)
+        download_url, download_version = api_endpoint(nas, download_api)
+    except SynologyApiError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 502
+
+    def get_item() -> dict:
+        payload = post_synology(
+            nas.client,
+            item_url,
+            {
+                "api": item_api,
+                "version": item_version,
+                "method": "get",
+                "id": json.dumps([photo_id], separators=(",", ":")),
+                "additional": json.dumps(["thumbnail", "tag"], separators=(",", ":")),
+                "_sid": nas.sid,
+            },
+        )
+        data = payload.get("data")
+        items = data.get("list") if isinstance(data, dict) else None
+        if not isinstance(items, list) or not items or not isinstance(items[0], dict):
+            raise SynologyApiError("Photos API 找不到指定照片。", 404)
+        return items[0]
+
+    def tag_names() -> list[str]:
+        item = get_item()
+        additional = item.get("additional") if isinstance(item.get("additional"), dict) else {}
+        tags = additional.get("tag") if isinstance(additional.get("tag"), list) else []
+        return [tag["name"] for tag in tags if isinstance(tag, dict) and isinstance(tag.get("name"), str)]
+
+    def original_fingerprint() -> dict:
+        item = get_item()
+        additional = item.get("additional") if isinstance(item.get("additional"), dict) else {}
+        thumbnail = additional.get("thumbnail") if isinstance(additional.get("thumbnail"), dict) else {}
+        cache_key = thumbnail.get("cache_key")
+        unit_id = thumbnail.get("unit_id", photo_id)
+        if not isinstance(cache_key, str) or not cache_key or not isinstance(unit_id, int):
+            raise SynologyApiError("Synology Photos 未提供原檔下載識別資料。")
+        response = None
+        digest = hashlib.sha256()
+        prefix = bytearray()
+        byte_count = 0
+        try:
+            response = nas.client.get(
+                download_url,
+                params={
+                    "api": download_api,
+                    "version": download_version,
+                    "method": "download",
+                    "cache_key": cache_key,
+                    "unit_id": json.dumps([unit_id], separators=(",", ":")),
+                    "_sid": nas.sid,
+                },
+                stream=True,
+                timeout=(4, 60),
+            )
+            response.raise_for_status()
+            for chunk in response.iter_content(chunk_size=256 * 1024):
+                if not chunk:
+                    continue
+                byte_count += len(chunk)
+                if byte_count > 100 * 1024 * 1024:
+                    raise SynologyApiError("測試原檔超過 100 MiB 上限。")
+                digest.update(chunk)
+                if len(prefix) < 32:
+                    prefix.extend(chunk[: 32 - len(prefix)])
+        except requests.exceptions.RequestException as exc:
+            raise SynologyApiError("Photos API 無法下載原檔以比對寫入前後內容。") from exc
+        finally:
+            if response is not None:
+                response.close()
+        detected = detect_photo_format(bytes(prefix))
+        if not detected:
+            raise SynologyApiError("Photos API 回傳的原檔格式無法辨識。")
+        return {"format": detected[0], "bytes": byte_count, "sha256": digest.hexdigest()}
+
+    try:
+        before = original_fingerprint()
+    except SynologyApiError as exc:
+        status = 404 if exc.error_code == 404 else 502
+        return jsonify({"ok": False, "error": str(exc)}), status
+    if before["format"] != expected_format:
+        return jsonify({
+            "ok": False,
+            "error": f"ID {photo_id} 預期為 {expected_format}，Photos API 實際回傳 {before['format']}；未執行寫入。",
+            "format": before["format"],
+            "bytes": before["bytes"],
+        }), 409
+
+    test_tag = f"PhotoTagger-API-Test-{uuid.uuid4().hex[:12]}"
+    add_succeeded = False
+    add_visible = False
+    remove_succeeded = False
+    cleanup_verified = False
+    after_add = None
+    after_remove = None
+    write_error = None
+    cleanup_error = None
+    try:
+        post_synology(
+            nas.client,
+            item_url,
+            {
+                "api": item_api,
+                "version": 1,
+                "method": "add_tag",
+                "id": json.dumps([photo_id], separators=(",", ":")),
+                "tag": json.dumps([test_tag], separators=(",", ":")),
+                "_sid": nas.sid,
+            },
+        )
+        add_succeeded = True
+        add_visible = test_tag in tag_names()
+        after_add = original_fingerprint()
+    except SynologyApiError as exc:
+        write_error = str(exc)
+    finally:
+        # Attempt cleanup even if add_tag timed out after the NAS applied it.
+        try:
+            post_synology(
+                nas.client,
+                item_url,
+                {
+                    "api": item_api,
+                    "version": 1,
+                    "method": "remove_tag",
+                    "id": json.dumps([photo_id], separators=(",", ":")),
+                    "tag": json.dumps([test_tag], separators=(",", ":")),
+                    "_sid": nas.sid,
+                },
+            )
+            remove_succeeded = True
+        except SynologyApiError as exc:
+            cleanup_error = str(exc)
+        try:
+            cleanup_verified = test_tag not in tag_names()
+            after_remove = original_fingerprint()
+        except SynologyApiError as exc:
+            cleanup_error = cleanup_error or str(exc)
+
+    result = {
+        "ok": add_succeeded and add_visible and cleanup_verified and after_add is not None and after_remove is not None,
+        "photo_id": photo_id,
+        "space": space,
+        "format": before["format"],
+        "test_tag": test_tag,
+        "add_api_succeeded": add_succeeded,
+        "tag_visible_after_add": add_visible,
+        "remove_api_succeeded": remove_succeeded,
+        "test_tag_absent_after_cleanup": cleanup_verified,
+        "before": before,
+        "after_add": after_add,
+        "after_remove": after_remove,
+        "file_bytes_changed_after_add": (
+            after_add["sha256"] != before["sha256"] if after_add else None
+        ),
+        "file_bytes_restored_after_cleanup": (
+            after_remove["sha256"] == before["sha256"] if after_remove else None
+        ),
+        "error": write_error,
+        "cleanup_error": cleanup_error,
+    }
+    return jsonify(result), 200
+
+
 @app.post("/api/photos/<int:photo_id>/analyze")
 def photo_analyze(photo_id: int):
     """Queue a read-only photo analysis so browser-facing requests stay short."""
@@ -1519,10 +1704,27 @@ def _perform_photo_analysis(photo_id: int):
         except ValueError:
             error_payload = {}
         message = error_payload.get("error") if isinstance(error_payload, dict) else None
-        status = response.status_code if response is not None else 502
+        upstream_status = response.status_code if response is not None else None
+        status = upstream_status or 502
         if status not in {400, 401, 413, 415, 503, 504}:
             status = 502
-        return jsonify({"ok": False, "error": message or "本機 MLX 分析服務回報錯誤。"}), status
+        content_type = response.headers.get("Content-Type", "") if response is not None else ""
+        body_excerpt = response.text[:800].strip() if response is not None else ""
+        if not message:
+            message = (
+                f"本機 MLX 分析服務回報 HTTP {upstream_status}。"
+                if upstream_status is not None
+                else "本機 MLX 分析服務回報錯誤。"
+            )
+        return jsonify({
+            "ok": False,
+            "error": message,
+            "diagnostics": {
+                "upstream_status": upstream_status,
+                "content_type": content_type or None,
+                "body_excerpt": body_excerpt or None,
+            },
+        }), status
     except requests.exceptions.RequestException:
         return jsonify({"ok": False, "error": "無法連線 Mac-mini 本機 MLX 分析服務。"}), 502
     except ValueError:
@@ -1583,7 +1785,33 @@ def photo_ocr_status(task_id: str):
             "queued", "running", "complete", "failed",
         }:
             return jsonify({"ok": False, "error": "OCR 狀態回應格式無效。"}), 502
-        return jsonify({"ok": True, "status": payload["status"], "ocr": payload.get("ocr")})
+        task_result = payload.get("result")
+        ocr = payload.get("ocr")
+        if ocr is None and isinstance(task_result, dict):
+            ocr = task_result.get("ocr")
+        diagnostics = {
+            "task_id": task_id,
+            "status": payload["status"],
+            "upstream_http_status": response.status_code,
+        }
+        for source in (payload, task_result, ocr):
+            if not isinstance(source, dict):
+                continue
+            for field in ("engine", "model", "elapsed_s", "status_code", "error_code", "error", "details"):
+                value = source.get(field)
+                if value is not None:
+                    diagnostics[field] = value
+        if isinstance(task_result, dict) and ocr is None and task_result.get("text"):
+            ocr = {"text": task_result["text"], **diagnostics}
+        elif isinstance(task_result, dict) and ocr is None and task_result.get("markdown"):
+            ocr = {"text": task_result["markdown"], **diagnostics}
+        return jsonify({
+            "ok": True,
+            "status": payload["status"],
+            "ocr": ocr,
+            "error": diagnostics.get("error"),
+            "diagnostics": diagnostics,
+        })
     except requests.exceptions.Timeout:
         return jsonify({"ok": False, "error": "查詢 OCR 狀態逾時，請稍後重試。"}), 504
     except requests.exceptions.HTTPError as exc:

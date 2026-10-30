@@ -67,7 +67,7 @@
 
         <aside class="side-panels">
           <article class="mini-panel next-panel"><div class="mini-icon">✳</div><div class="mini-kicker">NEXT UP</div><h3>建立你的第一個<br>AI 標記工作</h3><p>從 Synology 相簿挑選照片，再讓本機模型辨識內容。</p><span class="coming-label">連線確認後即可開始</span></article>
-          <article class="mini-panel privacy-panel"><div class="privacy-heading"><span>◈</span><strong>隱私優先設計</strong></div><p>原圖由 Photos API 唯讀取得，僅傳到你的 Mac-mini 本機 MLX 分析；不送第三方雲端，也不寫回照片標籤。</p><div class="privacy-foot"><span></span>你的資料由你掌握</div></article>
+          <article class="mini-panel privacy-panel"><div class="privacy-heading"><span>◈</span><strong>預覽維持唯讀</strong></div><p>一般瀏覽與 AI 分析不會寫回標籤。只有你明確確認下方 API 測試時，才會短暫新增並移除標籤；Synology Photos 仍可能改寫原檔。</p><div class="privacy-foot"><span></span>你的資料由你掌握</div></article>
         </aside>
       </section>
 
@@ -97,7 +97,7 @@
           <div class="security-hint"><strong>連線提醒</strong><span>瀏覽器到此 Web UI 使用 HTTP。請只在可信任的區域網路或 SSH tunnel 中輸入 NAS 密碼；瀏覽器到 NAS API 的連線使用已驗證的 HTTPS。</span></div>
           <div class="result-box" id="auth-result" hidden aria-live="polite"></div>
         </article>
-        <aside class="mini-panel privacy-panel browse-note"><div class="privacy-heading"><span>◈</span><strong>唯讀照片瀏覽</strong></div><p>AI 分析結果只作建議顯示，不會修改標籤、相片檔案或 Synology Photos 資料庫。選擇日本時會逐頁搜尋所選空間的相片庫。</p><div class="privacy-foot"><span></span>每頁最多 100 張</div></aside>
+        <aside class="mini-panel privacy-panel browse-note"><div class="privacy-heading"><span>◈</span><strong>先預覽，再驗證寫入</strong></div><p>照片瀏覽與 AI 分析維持唯讀。下方 JPG／HEIC API 驗證只在你明確確認後，暫時新增並移除測試標籤；Synology Photos 仍可能重寫原始檔。</p><div class="privacy-foot"><span></span>每頁最多 100 張</div></aside>
       </section>
 
       <section class="module-panel photo-panel" id="photo-browser" {% if not logged_in %}hidden{% endif %}>
@@ -110,6 +110,11 @@
           <label>每頁<select id="limit-select"><option>24</option><option selected>48</option><option>100</option></select></label>
           <button class="primary-button" id="load-photos" type="button">載入照片 <span class="button-arrow">→</span></button>
         </div>
+        <section class="api-write-verification" aria-labelledby="api-write-test-heading">
+          <div><strong id="api-write-test-heading">Synology Photos API 寫入驗證</strong><p>只測試指定的 JPG 與 HEIC 項目：加入唯一臨時標籤、讀回確認、移除標籤，再比較原檔 SHA-256。即使清除測試標籤，Photos 仍可能改變原檔內容或修改時間。</p></div>
+          <div class="api-write-test-actions"><button class="secondary-button" type="button" data-api-write-test="82153">測試 JPG · ID 82153</button><button class="secondary-button" type="button" data-api-write-test="82155">測試 HEIC · ID 82155</button></div>
+          <pre class="api-write-test-result" id="api-write-test-result" hidden aria-live="polite"></pre>
+        </section>
         <details class="tag-inventory" id="tag-inventory" hidden>
           <summary>現有標籤盤點 <span id="tag-inventory-count"></span></summary>
           <div class="tag-inventory-tools"><button class="secondary-button" id="copy-tag-inventory" type="button">複製清單</button></div>
@@ -471,6 +476,17 @@
             analysisResult.className = 'photo-ai-result';
             analysisResult.hidden = true;
             analysisResult.setAttribute('aria-live', 'polite');
+            const appendDebugDetails = (parent, diagnostics) => {
+              if (!diagnostics || typeof diagnostics !== 'object' || !Object.keys(diagnostics).length) return;
+              const details = document.createElement('details');
+              details.className = 'analysis-ocr-debug';
+              const summary = document.createElement('summary');
+              summary.textContent = '除錯資訊';
+              const content = document.createElement('pre');
+              content.textContent = JSON.stringify(diagnostics, null, 2);
+              details.append(summary, content);
+              parent.append(details);
+            };
             analyzeButton.addEventListener('click', async () => {
               analyzeButton.disabled = true;
               analyzeButton.textContent = '正在分析…';
@@ -494,9 +510,19 @@
                   const recovery = response.status === 504
                     ? '上游處理逾時，請稍後重試；通常不需要重新登入。'
                     : '請重新登入後再試；若仍發生，請提供這個 HTTP 狀態。';
-                  throw new Error(`分析服務回傳${responseKind}（HTTP ${response.status}）。${recovery}`);
+                  const failure = new Error(`分析服務回傳${responseKind}（HTTP ${response.status}）。${recovery}`);
+                  failure.diagnostics = {
+                    http_status: response.status,
+                    content_type: contentType || null,
+                    body_excerpt: responseText.slice(0, 800) || null,
+                  };
+                  throw failure;
                 }
-                if (!result.ok) throw new Error(result.error || '照片分析失敗。');
+                if (!result.ok) {
+                  const failure = new Error(result.error || '照片分析失敗。');
+                  failure.diagnostics = result.diagnostics;
+                  throw failure;
+                }
 
                 if (result.task_id) {
                   const taskId = result.task_id;
@@ -519,7 +545,9 @@
                         throw new Error(`分析狀態查詢回傳非 JSON（HTTP ${pollResponse.status}）。`);
                       }
                       if (!pollResponse.ok || !pollPayload.ok) {
-                        throw new Error(pollPayload.error || `HTTP ${pollResponse.status}`);
+                        const failure = new Error(pollPayload.error || `HTTP ${pollResponse.status}`);
+                        failure.diagnostics = pollPayload.diagnostics;
+                        throw failure;
                       }
                       consecutiveErrors = 0;
                       if (pollPayload.status === 'complete') {
@@ -527,7 +555,9 @@
                         completed = true;
                       } else if (pollPayload.status === 'failed') {
                         consecutiveErrors = 9;
-                        throw new Error(pollPayload.result?.error || '照片分析失敗。');
+                        const failure = new Error(pollPayload.result?.error || '照片分析失敗。');
+                        failure.diagnostics = pollPayload.result?.diagnostics;
+                        throw failure;
                       } else {
                         progress.textContent = pollPayload.status === 'queued'
                           ? '分析工作正在排隊…'
@@ -541,7 +571,11 @@
                   }
                   if (!completed) throw new Error('分析工作處理時間較長，請稍後重新查看。');
                   progress.remove();
-                  if (!result?.ok) throw new Error(result?.error || '照片分析失敗。');
+                  if (!result?.ok) {
+                    const failure = new Error(result?.error || '照片分析失敗。');
+                    failure.diagnostics = result?.diagnostics;
+                    throw failure;
+                  }
                 }
 
                 analysisResult.replaceChildren();
@@ -575,7 +609,7 @@
                 metadata.className = 'analysis-meta';
                 metadata.textContent = `${result.format} · ${result.model || 'MLX'} · ${Number(result.elapsed_s || 0).toFixed(1)} 秒${result.people?.length ? ` · Synology Photos 人物：${result.people.join('、')}` : ''}${result.location?.length ? ` · 地點：${result.location.join('、')}` : ''} · 原圖未保存`;
                 analysisResult.append(metadata);
-                const showOcrResult = (ocr) => {
+                const showOcrResult = (ocr, diagnostics = null) => {
                   if (ocr?.text) {
                     const ocrDetails = document.createElement('details');
                     ocrDetails.className = 'analysis-ocr';
@@ -591,6 +625,7 @@
                     ocrError.className = 'analysis-ocr-error';
                     ocrError.textContent = ocr.error;
                     analysisResult.append(ocrError);
+                    appendDebugDetails(analysisResult, diagnostics || ocr);
                   }
                 };
                 if (result.ocr?.task_id) {
@@ -605,6 +640,7 @@
                     return seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分鐘`;
                   };
                   let consecutiveErrors = 0;
+                  let lastPollError = '';
                   let ocrFinished = false;
                   let lastOcrStatus = 'queued';
                   while (!ocrFinished && Date.now() < deadline) {
@@ -623,7 +659,10 @@
                         ocrFinished = true;
                       } else if (pollPayload.status === 'failed') {
                         ocrProgress.remove();
-                        showOcrResult(pollPayload.ocr || { error: 'OCR 文字擷取失敗；視覺分析建議仍可使用。' });
+                        showOcrResult(
+                          pollPayload.ocr || { error: pollPayload.error || 'OCR 文字擷取失敗；視覺分析建議仍可使用。' },
+                          pollPayload.diagnostics,
+                        );
                         ocrFinished = true;
                       } else {
                         ocrProgress.textContent = pollPayload.status === 'queued'
@@ -632,8 +671,15 @@
                       }
                     } catch (pollError) {
                       consecutiveErrors += 1;
+                      lastPollError = pollError?.message || String(pollError);
                       if (consecutiveErrors >= 8) {
-                        ocrProgress.textContent = '暫時無法查詢 OCR 狀態；視覺分析建議仍可使用，請重新分析以再試一次。';
+                        ocrProgress.textContent = '暫時無法查詢 OCR 狀態；視覺分析建議仍可使用。可展開除錯資訊查看查詢錯誤。';
+                        appendDebugDetails(analysisResult, {
+                          task_id: result.ocr.task_id,
+                          last_poll_error: lastPollError,
+                          consecutive_failures: consecutiveErrors,
+                          elapsed: elapsedLabel(),
+                        });
                         ocrFinished = true;
                       }
                     }
@@ -645,7 +691,11 @@
                   showOcrResult(result.ocr);
                 }
               } catch (error) {
-                analysisResult.textContent = error.message || '照片分析失敗。';
+                const message = document.createElement('p');
+                message.className = 'analysis-ocr-error';
+                message.textContent = error.message || '照片分析失敗。';
+                analysisResult.replaceChildren(message);
+                appendDebugDetails(analysisResult, error.diagnostics);
                 analysisResult.classList.add('error-text');
               } finally {
                 analyzeButton.disabled = false;
@@ -750,6 +800,34 @@
       photoBrowser.hidden = true;
       resetPhotoTags();
       showAuthResult('已登出 Synology Photos。', 'success');
+    });
+
+    document.querySelectorAll('[data-api-write-test]')?.forEach(button => {
+      button.addEventListener('click', async () => {
+        const photoId = button.dataset.apiWriteTest;
+        const format = photoId === '82153' ? 'JPG' : 'HEIC';
+        const resultBox = document.getElementById('api-write-test-result');
+        if (!window.confirm(`即將透過 Synology Photos API 對 ${format}（ID ${photoId}）新增並移除唯一測試標籤。Photos 可能重寫原始檔；移除標籤不保證檔案位元組或修改時間復原。要繼續嗎？`)) return;
+        button.disabled = true;
+        resultBox.hidden = false;
+        resultBox.textContent = `正在驗證 ${format}（ID ${photoId}）；請勿關閉頁面…`;
+        try {
+          const space = document.getElementById('space-select').value;
+          const response = await fetch(`/api/photos/${encodeURIComponent(photoId)}/api-write-test?space=${encodeURIComponent(space)}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ confirmed: true }),
+          });
+          const payload = await response.json();
+          resultBox.textContent = JSON.stringify(payload, null, 2);
+          resultBox.classList.toggle('error-text', !response.ok || !payload.ok);
+        } catch (error) {
+          resultBox.textContent = error.message || 'Photos API 寫入驗證失敗。';
+          resultBox.classList.add('error-text');
+        } finally {
+          button.disabled = false;
+        }
+      });
     });
 
     document.getElementById('load-photos')?.addEventListener('click', () => loadPhotos(0));

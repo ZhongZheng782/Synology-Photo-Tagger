@@ -272,7 +272,7 @@
 
 ## Docker 開發版
 
-目前程式版本為 **v0.3.12**，包含容器內 Tailscale userspace proxy、私有 MLX 照片分析、文件 OCR、Synology Photos 人物與地點上下文，以及唯讀既有標籤盤點。標籤清單會顯示每個標籤目前使用的項目數，並可複製清單；分析時會即時讀取目前登入者所選空間的既有標籤，要求 AI 優先沿用完全相同的名稱，只有沒有合適項目時才提出新標籤。不同登入者使用各自可讀取的標籤；若 API 無法提供詞彙，分析不會套用其他人的標籤。使用次數不影響照片相關性；人物標籤只使用該照片 metadata 已確認的人名。原圖只上傳 Mac-mini 一次，視覺分析和 OCR 共用同一份暫存影像。照片讀取與 AI 分析在背景執行；OCR 頁面會分別顯示等待中或處理中及已經過時間，頁面以短請求輪詢結果，避免上游閘道因長時間同步等待而回傳 504。人物姓名和地點由 Synology Photos metadata 提供，Photo Tagger 不會自行辨認姓名與臉孔的對應，也不會只憑座標斷定地標。標籤盤點與 AI 詞彙提示僅讀取 Synology Photos 資料，不會寫入或修改標籤。映像發佈後，NAS Compose 將使用 `v0.3.12` 標籤。Docker Hub Repository overview 的同步稿位於 [`DOCKERHUB.md`](DOCKERHUB.md)。
+目前程式版本為 **v0.3.14**，包含容器內 Tailscale userspace proxy、私有 MLX 照片分析、文件 OCR、Synology Photos 人物與地點上下文、唯讀標籤盤點，以及需要明確確認的 JPG／HEIC Photos API 寫入驗證。標籤盤點與 AI 詞彙提示依目前登入者及所選空間讀取既有標籤。API 寫入驗證只作用於指定的 JPG ID 82153 與 HEIC ID 82155：加入唯一臨時標籤、讀回確認、移除標籤，並透過 Photos API 下載原檔比對 SHA-256；Synology Photos 仍可能改變原檔內容或修改時間。一般照片瀏覽與 AI 分析維持唯讀，AI 建議不會自動寫回。映像發佈後，NAS Compose 將使用 `v0.3.14` 標籤。Docker Hub Repository overview 的同步稿位於 [`DOCKERHUB.md`](DOCKERHUB.md)。
 
 此版本提供繁體中文 Web 首頁、唯讀 Photos API 瀏覽與單張照片 AI 分析預覽。使用者可在 UI 輸入 NAS 帳密（支援選填 OTP），登入後切換個人空間／共享空間，以分頁方式查看照片 ID、檔名、拍攝時間、地點及既有標籤；縮圖由本站代理顯示，metadata 按需從 Photos API 取得。候選清單可依日本地點與既有標籤篩選。登入工作階段和篩選索引只保存在服務程序記憶體中。
 
