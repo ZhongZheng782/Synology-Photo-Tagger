@@ -32,7 +32,7 @@ API_INFO_PARAMS = {
 API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.3.16")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.3.17")
 MLX_SERVER_URL = os.environ.get(
     "MLX_SERVER_URL", "http://mac-mini.tail28f10.ts.net:5001"
 ).strip().rstrip("/")
@@ -1282,9 +1282,11 @@ def photo_api_write_test(photo_id: int):
     expected_format = {82153: "JPEG", 82155: "HEIC/HEIF"}[photo_id]
     item_api = "SYNO.Foto.Browse.Item" if space == "personal" else "SYNO.FotoTeam.Browse.Item"
     download_api = "SYNO.Foto.Download" if space == "personal" else "SYNO.FotoTeam.Download"
+    tag_api = "SYNO.Foto.Browse.GeneralTag" if space == "personal" else "SYNO.FotoTeam.Browse.GeneralTag"
     try:
         item_url, item_version = api_endpoint(nas, item_api)
         download_url, download_version = api_endpoint(nas, download_api)
+        tag_url, _ = api_endpoint(nas, tag_api)
     except SynologyApiError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 502
 
@@ -1385,7 +1387,51 @@ def photo_api_write_test(photo_id: int):
     cleanup_error_code = None
     write_error_details = []
     cleanup_error_details = []
+    tag_id = None
+    failed_operation = "create_tag"
     try:
+        created_tag = post_synology(
+            nas.client,
+            tag_url,
+            {
+                "api": tag_api,
+                "version": 1,
+                "method": "create",
+                "name": test_tag,
+                "_sid": nas.sid,
+            },
+        )
+        created_data = created_tag.get("data")
+        if isinstance(created_data, dict):
+            for candidate in (created_data, created_data.get("tag")):
+                if isinstance(candidate, dict) and isinstance(candidate.get("id"), int):
+                    tag_id = candidate["id"]
+                    break
+        if tag_id is None:
+            # Some Photos builds return only status from create; resolve the
+            # just-created unique name immediately instead of caching tag IDs.
+            listed_tags = post_synology(
+                nas.client,
+                tag_url,
+                {
+                    "api": tag_api,
+                    "version": 1,
+                    "method": "list",
+                    "offset": 0,
+                    "limit": 1000,
+                    "_sid": nas.sid,
+                },
+            ).get("data", {}).get("list", [])
+            tag_id = next(
+                (
+                    row.get("id") for row in listed_tags
+                    if isinstance(row, dict) and row.get("name") == test_tag and isinstance(row.get("id"), int)
+                ),
+                None,
+            )
+        if tag_id is None:
+            raise SynologyApiError("Photos API 已建立測試標籤，但未回傳可用的標籤 ID。")
+        failed_operation = "add_tag"
         post_synology(
             nas.client,
             item_url,
@@ -1394,7 +1440,7 @@ def photo_api_write_test(photo_id: int):
                 "version": 1,
                 "method": "add_tag",
                 "id": json.dumps([photo_id], separators=(",", ":")),
-                "tag": json.dumps([test_tag], separators=(",", ":")),
+                "tag": json.dumps([tag_id], separators=(",", ":")),
                 "_sid": nas.sid,
             },
         )
@@ -1407,24 +1453,25 @@ def photo_api_write_test(photo_id: int):
         write_error_details = exc.error_details
     finally:
         # Attempt cleanup even if add_tag timed out after the NAS applied it.
-        try:
-            post_synology(
-                nas.client,
-                item_url,
-                {
-                    "api": item_api,
-                    "version": 1,
-                    "method": "remove_tag",
-                    "id": json.dumps([photo_id], separators=(",", ":")),
-                    "tag": json.dumps([test_tag], separators=(",", ":")),
-                    "_sid": nas.sid,
-                },
-            )
-            remove_succeeded = True
-        except SynologyApiError as exc:
-            cleanup_error = str(exc)
-            cleanup_error_code = exc.error_code
-            cleanup_error_details = exc.error_details
+        if tag_id is not None:
+            try:
+                post_synology(
+                    nas.client,
+                    item_url,
+                    {
+                        "api": item_api,
+                        "version": 1,
+                        "method": "remove_tag",
+                        "id": json.dumps([photo_id], separators=(",", ":")),
+                        "tag": json.dumps([tag_id], separators=(",", ":")),
+                        "_sid": nas.sid,
+                    },
+                )
+                remove_succeeded = True
+            except SynologyApiError as exc:
+                cleanup_error = str(exc)
+                cleanup_error_code = exc.error_code
+                cleanup_error_details = exc.error_details
         try:
             cleanup_verified = test_tag not in tag_names()
             after_remove = original_fingerprint()
@@ -1437,6 +1484,7 @@ def photo_api_write_test(photo_id: int):
         "space": space,
         "format": before["format"],
         "test_tag": test_tag,
+        "test_tag_id": tag_id,
         "add_api_succeeded": add_succeeded,
         "tag_visible_after_add": add_visible,
         "remove_api_succeeded": remove_succeeded,
@@ -1453,8 +1501,8 @@ def photo_api_write_test(photo_id: int):
         "error": write_error,
         "error_code": write_error_code,
         "error_details": write_error_details,
-        "failed_operation": "add_tag" if write_error else None,
-        "api_module": item_api if write_error else None,
+        "failed_operation": failed_operation if write_error else None,
+        "api_module": (tag_api if failed_operation == "create_tag" else item_api) if write_error else None,
         "api_version": 1 if write_error else None,
         "cleanup_error": cleanup_error,
         "cleanup_error_code": cleanup_error_code,

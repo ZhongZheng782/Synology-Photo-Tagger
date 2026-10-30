@@ -272,7 +272,7 @@
 
 ## Docker 開發版
 
-目前程式版本為 **v0.3.16**，包含容器內 Tailscale userspace proxy、私有 MLX 照片分析、文件 OCR、Synology Photos 人物與地點上下文、唯讀標籤盤點，以及需要明確確認的 JPG／HEIC Photos API 寫入驗證。標籤盤點與 AI 詞彙提示依目前登入者及所選空間讀取既有標籤。API 寫入驗證只作用於指定的 JPG ID 82153 與 HEIC ID 82155：加入唯一臨時標籤、讀回確認、移除標籤，並透過 Photos API 下載原檔比對 SHA-256；Synology Photos 仍可能改變原檔內容或修改時間。失敗回應包含 Synology API 錯誤碼、參數名稱與原因（若 NAS 有回傳），以及操作資訊。一般照片瀏覽與 AI 分析維持唯讀，AI 建議不會自動寫回。映像發佈後，NAS Compose 將使用 `v0.3.16` 標籤。Docker Hub Repository overview 的同步稿位於 [`DOCKERHUB.md`](DOCKERHUB.md)。
+目前程式版本為 **v0.3.17**，包含容器內 Tailscale userspace proxy、私有 MLX 照片分析、文件 OCR、Synology Photos 人物與地點上下文、唯讀標籤盤點，以及需要明確確認的 JPG／HEIC Photos API 寫入驗證。標籤盤點與 AI 詞彙提示依目前登入者及所選空間讀取既有標籤。API 寫入驗證只作用於指定的 JPG ID 82153 與 HEIC ID 82155：先透過 GeneralTag API 建立唯一臨時標籤並取得標籤 ID，再加入照片、讀回確認、移除標籤，最後透過 Photos API 下載原檔比對 SHA-256；Synology Photos 仍可能改變原檔內容或修改時間。失敗回應包含 Synology API 錯誤碼、參數名稱與原因（若 NAS 有回傳），以及操作資訊。一般照片瀏覽與 AI 分析維持唯讀，AI 建議不會自動寫回。映像發佈後，NAS Compose 將使用 `v0.3.17` 標籤。Docker Hub Repository overview 的同步稿位於 [`DOCKERHUB.md`](DOCKERHUB.md)。
 
 此版本提供繁體中文 Web 首頁、唯讀 Photos API 瀏覽與單張照片 AI 分析預覽。使用者可在 UI 輸入 NAS 帳密（支援選填 OTP），登入後切換個人空間／共享空間，以分頁方式查看照片 ID、檔名、拍攝時間、地點及既有標籤；縮圖由本站代理顯示，metadata 按需從 Photos API 取得。候選清單可依日本地點與既有標籤篩選。登入工作階段和篩選索引只保存在服務程序記憶體中。
 
