@@ -32,9 +32,62 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            wenchiehlee1020/synology-photo-tagger:latest
             wenchiehlee1020/synology-photo-tagger:v0.3.19
-            wenchiehlee1020/synology-photo-tagger:sha-${{ github.sha }}
+
+      - name: Remove non-version image tags
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          namespace = "wenchiehlee1020"
+          repository = "synology-photo-tagger"
+          api = "https://hub.docker.com"
+          headers = {"Accept": "application/json"}
+          credentials = json.dumps({
+              "username": os.environ["DOCKERHUB_USERNAME"],
+              "password": os.environ["DOCKERHUB_TOKEN"],
+          }).encode()
+          login = urllib.request.Request(
+              f"{api}/v2/users/login/", data=credentials,
+              headers={**headers, "Content-Type": "application/json"}, method="POST",
+          )
+          with urllib.request.urlopen(login, timeout=30) as response:
+              jwt = json.load(response)["token"]
+          auth_headers = {**headers, "Authorization": f"JWT {jwt}"}
+
+          next_url = f"{api}/v2/repositories/{namespace}/{repository}/tags?page_size=100"
+          tags = []
+          while next_url:
+              parsed = urllib.parse.urlparse(next_url)
+              if parsed.scheme != "https" or parsed.netloc != "hub.docker.com":
+                  raise RuntimeError("Unexpected Docker Hub pagination URL")
+              request = urllib.request.Request(next_url, headers=auth_headers)
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  page = json.load(response)
+              tags.extend(item["name"] for item in page.get("results", []))
+              next_url = page.get("next")
+
+          version_tag = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+$")
+          obsolete = [tag for tag in tags if not version_tag.fullmatch(tag)]
+          print(f"Keeping {len(tags) - len(obsolete)} version tags; removing {len(obsolete)} non-version tags.")
+          for tag in obsolete:
+              encoded_tag = urllib.parse.quote(tag, safe="")
+              url = f"{api}/v2/repositories/{namespace}/{repository}/tags/{encoded_tag}/"
+              request = urllib.request.Request(url, headers=auth_headers, method="DELETE")
+              try:
+                  with urllib.request.urlopen(request, timeout=30) as response:
+                      print(f"Removed tag {tag}: HTTP {response.status}")
+              except urllib.error.HTTPError as error:
+                  raise RuntimeError(f"Could not remove Docker Hub tag {tag}: HTTP {error.code}") from error
+          PY
 
       - name: Update Docker Hub repository overview
         uses: peter-evans/dockerhub-description@v5
