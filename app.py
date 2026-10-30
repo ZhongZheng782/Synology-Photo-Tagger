@@ -32,7 +32,7 @@ API_INFO_PARAMS = {
 API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.3.15")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.3.16")
 MLX_SERVER_URL = os.environ.get(
     "MLX_SERVER_URL", "http://mac-mini.tail28f10.ts.net:5001"
 ).strip().rstrip("/")
@@ -89,9 +89,10 @@ PHOTO_ANALYSIS_MAX_ACTIVE_JOBS = 4
 
 
 class SynologyApiError(Exception):
-    def __init__(self, message: str, error_code: int | None = None):
+    def __init__(self, message: str, error_code: int | None = None, error_details: list | None = None):
         super().__init__(message)
         self.error_code = error_code
+        self.error_details = error_details or []
 
 
 def api_error(payload: object) -> int | None:
@@ -101,6 +102,28 @@ def api_error(payload: object) -> int | None:
     if isinstance(error, dict) and isinstance(error.get("code"), int):
         return error["code"]
     return None
+
+
+def api_error_details(payload: object) -> list[dict[str, str]]:
+    """Keep only parameter-name/reason fields; never expose raw NAS payloads."""
+    if not isinstance(payload, dict):
+        return []
+    error = payload.get("error")
+    errors = error.get("errors") if isinstance(error, dict) else None
+    if not isinstance(errors, list):
+        return []
+    details = []
+    for item in errors[:10]:
+        if not isinstance(item, dict):
+            continue
+        detail = {
+            key: value[:160]
+            for key in ("name", "reason")
+            if isinstance((value := item.get(key)), str)
+        }
+        if detail:
+            details.append(detail)
+    return details
 
 
 def api_message(payload: object) -> str:
@@ -136,7 +159,7 @@ def post_synology(client: requests.Session, url: str, data: dict) -> dict:
     if not isinstance(payload, dict):
         raise SynologyApiError("NAS 回應格式不符預期。")
     if not payload.get("success"):
-        raise SynologyApiError(api_message(payload), api_error(payload))
+        raise SynologyApiError(api_message(payload), api_error(payload), api_error_details(payload))
     return payload
 
 
@@ -1360,6 +1383,8 @@ def photo_api_write_test(photo_id: int):
     cleanup_error = None
     write_error_code = None
     cleanup_error_code = None
+    write_error_details = []
+    cleanup_error_details = []
     try:
         post_synology(
             nas.client,
@@ -1379,6 +1404,7 @@ def photo_api_write_test(photo_id: int):
     except SynologyApiError as exc:
         write_error = str(exc)
         write_error_code = exc.error_code
+        write_error_details = exc.error_details
     finally:
         # Attempt cleanup even if add_tag timed out after the NAS applied it.
         try:
@@ -1398,6 +1424,7 @@ def photo_api_write_test(photo_id: int):
         except SynologyApiError as exc:
             cleanup_error = str(exc)
             cleanup_error_code = exc.error_code
+            cleanup_error_details = exc.error_details
         try:
             cleanup_verified = test_tag not in tag_names()
             after_remove = original_fingerprint()
@@ -1425,11 +1452,13 @@ def photo_api_write_test(photo_id: int):
         ),
         "error": write_error,
         "error_code": write_error_code,
+        "error_details": write_error_details,
         "failed_operation": "add_tag" if write_error else None,
         "api_module": item_api if write_error else None,
         "api_version": 1 if write_error else None,
         "cleanup_error": cleanup_error,
         "cleanup_error_code": cleanup_error_code,
+        "cleanup_error_details": cleanup_error_details,
         "cleanup_operation": "remove_tag" if cleanup_error else None,
     }
     return jsonify(result), 200
