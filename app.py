@@ -32,7 +32,7 @@ API_INFO_PARAMS = {
 API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.3.14")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.3.15")
 MLX_SERVER_URL = os.environ.get(
     "MLX_SERVER_URL", "http://mac-mini.tail28f10.ts.net:5001"
 ).strip().rstrip("/")
@@ -1358,6 +1358,8 @@ def photo_api_write_test(photo_id: int):
     after_remove = None
     write_error = None
     cleanup_error = None
+    write_error_code = None
+    cleanup_error_code = None
     try:
         post_synology(
             nas.client,
@@ -1376,6 +1378,7 @@ def photo_api_write_test(photo_id: int):
         after_add = original_fingerprint()
     except SynologyApiError as exc:
         write_error = str(exc)
+        write_error_code = exc.error_code
     finally:
         # Attempt cleanup even if add_tag timed out after the NAS applied it.
         try:
@@ -1394,6 +1397,7 @@ def photo_api_write_test(photo_id: int):
             remove_succeeded = True
         except SynologyApiError as exc:
             cleanup_error = str(exc)
+            cleanup_error_code = exc.error_code
         try:
             cleanup_verified = test_tag not in tag_names()
             after_remove = original_fingerprint()
@@ -1420,7 +1424,13 @@ def photo_api_write_test(photo_id: int):
             after_remove["sha256"] == before["sha256"] if after_remove else None
         ),
         "error": write_error,
+        "error_code": write_error_code,
+        "failed_operation": "add_tag" if write_error else None,
+        "api_module": item_api if write_error else None,
+        "api_version": 1 if write_error else None,
         "cleanup_error": cleanup_error,
+        "cleanup_error_code": cleanup_error_code,
+        "cleanup_operation": "remove_tag" if cleanup_error else None,
     }
     return jsonify(result), 200
 

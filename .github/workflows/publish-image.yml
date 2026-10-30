@@ -33,7 +33,7 @@ jobs:
           push: true
           tags: |
             wenchiehlee1020/synology-photo-tagger:latest
-            wenchiehlee1020/synology-photo-tagger:v0.3.14
+            wenchiehlee1020/synology-photo-tagger:v0.3.15
             wenchiehlee1020/synology-photo-tagger:sha-${{ github.sha }}
 
       - name: Update Docker Hub repository overview
@@ -42,5 +42,5 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
           repository: wenchiehlee1020/synology-photo-tagger
-          short-description: Synology Photos with private MLX and confirmed JPG/HEIC API write checks (v0.3.14).
+          short-description: Synology Photos with private MLX and confirmed JPG/HEIC API write checks (v0.3.15).
           readme-filepath: ./DOCKERHUB.md
