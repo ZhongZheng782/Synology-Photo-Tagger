@@ -38,7 +38,7 @@ API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 NAS_SESSION_TTL_SECONDS = 12 * 60 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.4.2")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.4.3")
 TAGGER_DB_PATH = os.environ.get(
     "TAGGER_DB_PATH", os.path.join(os.path.dirname(__file__), "data", "photo-tagger.sqlite3")
 )
@@ -53,7 +53,7 @@ MLX_TIMEOUT_SECONDS = max(30, int(os.environ.get("MLX_TIMEOUT_SECONDS", "900")))
 MAX_PHOTO_ANALYSIS_BYTES = 30 * 1024 * 1024
 PHOTO_ANALYSIS_PROMPT = """請用繁體中文客觀分析照片，並且只輸出一個合法 JSON 物件，不要加 Markdown 或其他文字：
 {"description":"一至兩句簡潔、只描述畫面可見事實的內容","tags":["0 至 8 個適合搜尋的短標籤"]}
-標籤只根據可見內容；優先沿用提供的 Synology Photos 現有標籤，必須逐字使用清單中的標準寫法。只有當清單中沒有能準確描述畫面的標籤時，才提出簡潔、可重複使用的新標籤。不要為了湊數硬加標籤，也不要因標籤使用次數較多就提高其優先度。若照片明確呈現購物情境才加入「購物」。不要推測人物身分、健康、年齡等敏感特徵；不確定時省略。人物標籤只能使用本張照片 Synology Photos metadata 已確認的人名，不得自行辨認或猜測姓名。"""
+標籤只根據可見內容；優先沿用提供的 Synology Photos 現有標籤，必須逐字使用清單中的標準寫法。只有當清單中沒有能準確描述畫面的標籤時，才提出簡潔、可重複使用的新標籤。不要為了湊數硬加標籤，也不要因標籤使用次數較多就提高其優先度。「證件」只用於用途本身是辨識或證明持有人身分的正式證件（例如身分證、護照、駕照）；一般報告、表格、收據、檢驗單即使印有人名或編號，也應標為「文件」或更具體的內容，不可只因含有個人資料就標為「證件」。若照片明確呈現購物情境才加入「購物」。不要推測人物身分、健康、年齡等敏感特徵；不確定時省略。人物標籤只能使用本張照片 Synology Photos metadata 已確認的人名，不得自行辨認或猜測姓名。"""
 SHOPPING_JOB_PROMPT = """請用繁體中文分析照片是否有明確的購物情境，並且只輸出一個合法 JSON 物件，不要加 Markdown 或其他文字：
 {"task_relevant":true,"confidence":0.92,"evidence":["商店貨架","商品標價"],"description":"簡短描述照片中可見的購物證據","tags":["購物"]}
 task_relevant 必須是 true 或 false；confidence 為 0 至 1 的數字。只有畫面有可見商店、選購商品、購物袋、收據或明確購物活動時才判 true。餐廳用餐、一般街景、只有人物或無法判斷時判 false。evidence 只列最多 6 個可見線索，不得推測。若判 false，tags 請回傳空陣列；若判 true，tags 僅使用「購物」。description 只寫畫面可見內容，不猜人物身份。"""

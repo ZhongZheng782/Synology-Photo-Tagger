@@ -32,7 +32,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            wenchiehlee1020/synology-photo-tagger:v0.4.2
+            wenchiehlee1020/synology-photo-tagger:v0.4.3
 
       - name: Remove non-version image tags
         env:
@@ -95,5 +95,5 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
           repository: wenchiehlee1020/synology-photo-tagger
-          short-description: Synology Photos AI tagging jobs with review, reports, undo and tag provenance (v0.4.2).
+          short-description: Synology Photos AI tagging with review, tag provenance and clearer document labels (v0.4.3).
           readme-filepath: ./DOCKERHUB.md
