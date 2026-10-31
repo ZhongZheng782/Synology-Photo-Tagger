@@ -373,6 +373,13 @@
           const place = [photo.city, photo.country].filter(Boolean).join(' · ') || '沒有地點資料';
           meta.textContent = `${dateText}　·　${place}`;
           body.append(title, meta);
+          if (photo.tagger_tags?.length) {
+            const taggerBadge = document.createElement('span');
+            taggerBadge.className = 'photo-tagger-badge';
+            taggerBadge.textContent = `Photo Tagger 已新增：${photo.tagger_tags.join('、')}`;
+            taggerBadge.title = '此標籤由已核對的 Photo Tagger 工作新增，且目前仍存在於照片上。';
+            body.append(taggerBadge);
+          }
           if (photo.tags?.length) {
             const tags = document.createElement('div');
             tags.className = 'photo-tags';

@@ -38,7 +38,7 @@ API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 NAS_SESSION_TTL_SECONDS = 12 * 60 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.4.1")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.4.2")
 TAGGER_DB_PATH = os.environ.get(
     "TAGGER_DB_PATH", os.path.join(os.path.dirname(__file__), "data", "photo-tagger.sqlite3")
 )
@@ -161,6 +161,14 @@ def initialize_tag_job_db() -> None:
             );
             CREATE INDEX IF NOT EXISTS tag_job_items_status
                 ON tag_job_items(job_id, status, review);
+            CREATE TABLE IF NOT EXISTS photo_tagger_tag_ledger (
+                owner_key TEXT NOT NULL,
+                space TEXT NOT NULL,
+                photo_id INTEGER NOT NULL,
+                tag_name TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                PRIMARY KEY(owner_key, space, photo_id, tag_name)
+            );
             """
         )
         item_columns = {row["name"] for row in db.execute("PRAGMA table_info(tag_job_items)").fetchall()}
@@ -845,6 +853,7 @@ def list_photos():
                 scan_photo_library_page(nas, api_name, url, version, index)
                 matches = [photo for photo in index.photos if matches_filter(photo)]
             photos = matches[offset:offset + limit]
+            photos = annotate_photo_tagger_tags(nas, photos, space, tag_job_owner_key())
             scanning = not index.complete and len(matches) < offset + limit
             return jsonify(
                 {
@@ -918,6 +927,7 @@ def list_photos():
                     if len(items) < batch_size:
                         search.complete = True
                 photos = search.photos[offset:offset + limit]
+                photos = annotate_photo_tagger_tags(nas, photos, space, tag_job_owner_key())
                 scan_needed = len(search.photos) < offset + limit and not search.complete
                 return jsonify(
                     {
@@ -960,6 +970,7 @@ def list_photos():
         if not isinstance(items, list):
             raise SynologyApiError("照片 API 回應中沒有清單資料。")
         photos = [item_summary(item) for item in items if isinstance(item, dict)]
+        photos = annotate_photo_tagger_tags(nas, photos, space, tag_job_owner_key())
         return jsonify(
             {
                 "ok": True,
@@ -1081,6 +1092,109 @@ def tag_job_owner_key() -> str | None:
         return None
     stable_name = f"{configured_base_url().casefold()}|{account.casefold()}".encode()
     return hashlib.sha256(stable_name).hexdigest()
+
+
+def record_photo_tagger_tags(owner_key: str, space: str, photo_id: int, tag_names: list[str]) -> None:
+    if not tag_names:
+        return
+    with tag_job_db() as db:
+        db.executemany(
+            "INSERT INTO photo_tagger_tag_ledger(owner_key, space, photo_id, tag_name, created_at) "
+            "VALUES(?,?,?,?,?) ON CONFLICT(owner_key, space, photo_id, tag_name) "
+            "DO UPDATE SET created_at=excluded.created_at",
+            [(owner_key, space, photo_id, name, time.time()) for name in tag_names],
+        )
+
+
+def annotate_photo_tagger_tags(
+    nas: NasSession, photos: list[dict], space: str, owner_key: str | None
+) -> list[dict]:
+    """Annotate this page with tags that a successful, non-undone job added and that remain on the photo."""
+    annotated = [dict(photo) for photo in photos]
+    if not owner_key:
+        return annotated
+    photo_ids = [photo.get("id") for photo in annotated if isinstance(photo.get("id"), int)]
+    if not photo_ids:
+        return annotated
+    placeholders = ",".join("?" for _ in photo_ids)
+    with tag_job_db() as db:
+        ledger_rows = db.execute(
+            "SELECT photo_id, tag_name FROM photo_tagger_tag_ledger "
+            f"WHERE owner_key=? AND space=? AND photo_id IN ({placeholders})",
+            (owner_key, space, *photo_ids),
+        ).fetchall()
+        rows = db.execute(
+            "SELECT i.photo_id, i.write_json FROM tag_job_items i "
+            "JOIN tag_jobs j ON j.id=i.job_id "
+            f"WHERE j.owner_key=? AND j.space=? AND i.status='written' "
+            "AND (i.undo_status IS NULL OR i.undo_status!='undone') "
+            f"AND i.photo_id IN ({placeholders})",
+            (owner_key, space, *photo_ids),
+        ).fetchall()
+    added_by_photo: dict[int, set[str]] = {}
+    for row in ledger_rows:
+        added_by_photo.setdefault(int(row["photo_id"]), set()).add(row["tag_name"].casefold())
+    for row in rows:
+        try:
+            write_result = json.loads(row["write_json"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        names = write_result.get("tags_added", []) if isinstance(write_result, dict) else []
+        if not isinstance(names, list):
+            continue
+        added_by_photo.setdefault(int(row["photo_id"]), set()).update(
+            name.casefold() for name in names if isinstance(name, str) and name.strip()
+        )
+    tracked_ids = sorted(added_by_photo)
+    current_tags: dict[int, list[str]] = {}
+    if tracked_ids:
+        item_api = "SYNO.Foto.Browse.Item" if space == "personal" else "SYNO.FotoTeam.Browse.Item"
+        try:
+            item_url, item_version = api_endpoint(nas, item_api)
+            for index in range(0, len(tracked_ids), 50):
+                page_ids = tracked_ids[index:index + 50]
+                payload = post_synology(
+                    nas.client,
+                    item_url,
+                    {
+                        "api": item_api,
+                        "version": item_version,
+                        "method": "get",
+                        "id": json.dumps(page_ids, separators=(",", ":")),
+                        "additional": json.dumps(["tag"], separators=(",", ":")),
+                        "_sid": nas.sid,
+                    },
+                )
+                data = payload.get("data")
+                rows = data.get("list") if isinstance(data, dict) else None
+                if not isinstance(rows, list):
+                    raise SynologyApiError("Photos API 沒有回傳標籤讀回資料。")
+                for item in rows:
+                    if not isinstance(item, dict) or not isinstance(item.get("id"), int):
+                        continue
+                    additional = item.get("additional") if isinstance(item.get("additional"), dict) else {}
+                    tags = additional.get("tag") if isinstance(additional.get("tag"), list) else []
+                    current_tags[item["id"]] = [
+                        tag["name"].strip() for tag in tags
+                        if isinstance(tag, dict) and isinstance(tag.get("name"), str) and tag["name"].strip()
+                    ]
+        except SynologyApiError:
+            # Do not claim a tag is still present based only on a stale library cache.
+            app.logger.info("Could not read current tag state for Photo Tagger candidate badges.")
+            return annotated
+    for photo in annotated:
+        added_names = added_by_photo.get(photo.get("id"), set())
+        if photo.get("id") in current_tags:
+            photo["tags"] = current_tags[photo["id"]]
+        current_names = {name.casefold() for name in photo.get("tags", []) if isinstance(name, str)}
+        photo["tagger_tags"] = sorted(
+            (
+                name for name in photo.get("tags", [])
+                if isinstance(name, str) and name.casefold() in (added_names & current_names)
+            ),
+            key=str.casefold,
+        )
+    return annotated
 
 
 def tag_job_summary(db: sqlite3.Connection, job: sqlite3.Row) -> dict:
@@ -2502,6 +2616,13 @@ def write_photo_analysis(photo_id: int):
         and tags_succeeded
         and tags_verified
     )
+    owner_key = tag_job_owner_key()
+    if success and owner_key and tags_to_add:
+        try:
+            record_photo_tagger_tags(owner_key, space, photo_id, tags_to_add)
+        except sqlite3.Error:
+            # A provenance index failure must not convert a verified Photos API write into an apparent failure.
+            app.logger.exception("Could not record Photo Tagger tag provenance for item %s", photo_id)
     return jsonify({
         "ok": success,
         "photo_id": photo_id,
