@@ -117,6 +117,17 @@
           <p>標籤來自目前所選 Synology Photos 空間；使用項目數可協助辨認常用詞與待整理詞彙。</p>
           <div class="tag-inventory-list" id="tag-inventory-list"></div>
         </details>
+        <section class="batch-tag-panel" aria-label="批次更改標籤">
+          <div><strong>批次更改標籤</strong><p>掃描所選空間內所有帶有來源標籤的照片，先查看影響筆數，再批次更改。Photos API 標籤寫入可能改變照片檔案 metadata。</p></div>
+          <label>來源標籤<select id="batch-source-tag" disabled><option value="">先載入標籤</option></select></label>
+          <label>目標標籤<select id="batch-destination-tag" disabled><option value="">先載入標籤</option></select></label>
+          <button class="secondary-button" id="batch-load-source" type="button" disabled>掃描來源照片</button>
+          <div class="batch-tag-actions" id="batch-tag-actions" hidden>
+            <span id="batch-selection-count">尚未掃描</span>
+            <button class="primary-button" id="batch-replace-tags" type="button" disabled>確認批次更改</button>
+          </div>
+          <div class="batch-tag-result" id="batch-tag-result" hidden role="status" aria-live="polite"></div>
+        </section>
         <div class="photo-list" id="photo-list" aria-live="polite"><div class="photo-empty">登入後載入照片清單。</div></div>
         <div class="photo-pagination"><span id="page-label">—</span><div><button class="secondary-button" id="prev-page" type="button" disabled>上一頁</button><button class="secondary-button" id="next-page" type="button" disabled>下一頁</button></div></div>
       </section>
@@ -156,6 +167,7 @@
     let photoRequestId = 0;
     let photoTagsSpace = null;
     let photoTagsRequestId = 0;
+    let batchPhotoIds = [];
 
     function showResult(message, kind) {
       resultBox.hidden = false;
@@ -279,6 +291,15 @@
           const orderedTags = [...tags.values()].sort((a, b) => a.name.localeCompare(b.name, 'zh-Hant'));
           renderPhotoTagOptions(select, orderedTags, selectedValue);
           renderTagInventory(orderedTags, complete);
+          for (const id of ['batch-source-tag', 'batch-destination-tag']) {
+            const batchSelect = document.getElementById(id);
+            const previous = batchSelect.value;
+            batchSelect.replaceChildren(new Option('選擇標籤', ''));
+            for (const tag of orderedTags) batchSelect.append(new Option(tag.name, tag.name));
+            batchSelect.disabled = false;
+            batchSelect.value = [...batchSelect.options].some(option => option.value === previous) ? previous : '';
+          }
+          document.getElementById('batch-load-source').disabled = false;
           button.textContent = complete ? `標籤 ${tags.size} 個` : `讀取中 ${tags.size} 個`;
           if (!complete) await new Promise(resolve => window.setTimeout(resolve, 120));
         }
@@ -859,6 +880,113 @@
       }
     }
 
+    document.getElementById('batch-load-source')?.addEventListener('click', async () => {
+      const source = document.getElementById('batch-source-tag').value;
+      const destination = document.getElementById('batch-destination-tag').value;
+      const result = document.getElementById('batch-tag-result');
+      if (!source || !destination) {
+        result.hidden = false;
+        result.textContent = '請先選擇來源與目標標籤。';
+        return;
+      }
+      if (source.toLocaleLowerCase() === destination.toLocaleLowerCase()) {
+        result.hidden = false;
+        result.textContent = '來源與目標標籤必須不同。';
+        return;
+      }
+      batchPhotoIds = [];
+      document.getElementById('batch-load-source').disabled = true;
+      document.getElementById('batch-source-tag').disabled = true;
+      document.getElementById('batch-destination-tag').disabled = true;
+      document.getElementById('batch-tag-actions').hidden = false;
+      document.getElementById('batch-replace-tags').disabled = true;
+      document.getElementById('batch-selection-count').textContent = '正在掃描…';
+      result.hidden = false;
+      result.textContent = `正在搜尋所選空間所有帶有「${source}」的照片…`;
+      try {
+        let offset = 0;
+        let complete = false;
+        let lastScanned = -1;
+        const found = new Map();
+        while (!complete) {
+          const params = new URLSearchParams({space: document.getElementById('space-select').value, country: '', tag: source, offset: String(offset), limit: '100'});
+          const response = await fetch(`/api/photos?${params}`);
+          const data = await response.json();
+          if (!data.ok) throw new Error(data.error || '照片掃描失敗。');
+          for (const photo of data.photos || []) if (Number.isInteger(Number(photo.id))) found.set(Number(photo.id), photo);
+          complete = Boolean(data.search_complete);
+          offset = Number(data.next_offset || 0);
+          document.getElementById('batch-selection-count').textContent = `已找到 ${found.size} 張 · 已掃描 ${data.scanned_count || 0} 張`;
+          result.textContent = `正在掃描來源標籤「${source}」：已找到 ${found.size} 張，已掃描 ${data.scanned_count || 0} 張。`;
+          if (!complete && data.scanned_count === lastScanned) throw new Error('掃描沒有前進；請稍後重試。');
+          lastScanned = data.scanned_count;
+        }
+        batchPhotoIds = [...found.keys()];
+        document.getElementById('batch-selection-count').textContent = `將處理 ${batchPhotoIds.length} 張照片`;
+        document.getElementById('batch-replace-tags').disabled = batchPhotoIds.length === 0;
+        result.textContent = batchPhotoIds.length
+          ? `掃描完成：將把 ${batchPhotoIds.length} 張照片的「${source}」改為「${destination}」。請按「確認批次更改」開始。`
+          : `掃描完成：目前空間沒有帶有「${source}」的照片。`;
+      } catch (error) {
+        batchPhotoIds = [];
+        document.getElementById('batch-selection-count').textContent = '掃描失敗';
+        result.textContent = error.message || '照片掃描失敗。';
+      } finally {
+        document.getElementById('batch-load-source').disabled = false;
+        document.getElementById('batch-source-tag').disabled = false;
+        document.getElementById('batch-destination-tag').disabled = false;
+      }
+    });
+
+    for (const id of ['batch-source-tag', 'batch-destination-tag']) {
+      document.getElementById(id)?.addEventListener('change', () => {
+        batchPhotoIds = [];
+        document.getElementById('batch-replace-tags').disabled = true;
+        document.getElementById('batch-selection-count').textContent = '來源或目標已變更，請重新掃描';
+        document.getElementById('batch-tag-result').hidden = true;
+      });
+    }
+
+    document.getElementById('batch-replace-tags')?.addEventListener('click', async () => {
+      const button = document.getElementById('batch-replace-tags');
+      const result = document.getElementById('batch-tag-result');
+      const source = document.getElementById('batch-source-tag').value;
+      const destination = document.getElementById('batch-destination-tag').value;
+      const ids = [...batchPhotoIds];
+      if (!ids.length) return;
+      button.disabled = true;
+      document.getElementById('batch-load-source').disabled = true;
+      document.getElementById('batch-source-tag').disabled = true;
+      document.getElementById('batch-destination-tag').disabled = true;
+      result.hidden = false;
+      let outcomes = [];
+      try {
+        for (let start = 0; start < ids.length; start += 25) {
+          result.textContent = `批次處理中：${Math.min(start + 25, ids.length)} / ${ids.length} 張；新增並確認「${destination}」後，才移除「${source}」。`;
+          const response = await fetch('/api/photos/tags/replace-batch', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({space: document.getElementById('space-select').value, source_tag: source, destination_tag: destination, photo_ids: ids.slice(start, start + 25)})
+          });
+          const data = await response.json();
+          if (!data.results) throw new Error(data.error || '批次操作中斷；請重新掃描來源標籤核對剩餘項目。');
+          outcomes.push(...data.results);
+        }
+        const counts = Object.fromEntries(['verified', 'skipped', 'failed', 'needs_review'].map(status => [status, outcomes.filter(item => item.status === status).length]));
+        const details = outcomes.filter(item => item.status !== 'verified').map(item => `${item.photo_id}: ${item.status}${item.error ? `（${item.error}）` : ''}`).join('\n');
+        result.textContent = `批次完成：已核對 ${counts.verified} 張、略過 ${counts.skipped} 張、失敗 ${counts.failed} 張、需人工核對 ${counts.needs_review} 張。${details ? `\n${details}` : ''}`;
+        batchPhotoIds = [];
+        await loadPhotos(photoOffset);
+      } catch (error) {
+        batchPhotoIds = [];
+        result.textContent = `${error.message || '批次操作失敗'}\n已完成 ${outcomes.filter(item => item.status === 'verified').length} 張；請重新掃描來源標籤再繼續。`;
+      } finally {
+        button.disabled = batchPhotoIds.length === 0;
+        document.getElementById('batch-load-source').disabled = false;
+        document.getElementById('batch-source-tag').disabled = false;
+        document.getElementById('batch-destination-tag').disabled = false;
+      }
+    });
+
     let activeTagJobId = null;
     let tagJobPollTimer = null;
 
@@ -1268,6 +1396,8 @@
     });
     document.getElementById('space-select')?.addEventListener('change', () => {
       resetPhotoTags();
+      batchPhotoIds = [];
+      document.getElementById('batch-tag-actions').hidden = true;
       if (!loginForm.hidden) loadPhotos(0);
     });
     for (const id of ['country-select', 'limit-select']) {

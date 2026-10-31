@@ -38,7 +38,7 @@ API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 NAS_SESSION_TTL_SECONDS = 12 * 60 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.4.3")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.4.4")
 TAGGER_DB_PATH = os.environ.get(
     "TAGGER_DB_PATH", os.path.join(os.path.dirname(__file__), "data", "photo-tagger.sqlite3")
 )
@@ -197,6 +197,8 @@ def initialize_tag_job_db() -> None:
 
 
 initialize_tag_job_db()
+
+_tag_replacement_lock = threading.Lock()
 
 
 class SynologyApiError(Exception):
@@ -1084,6 +1086,130 @@ def list_photo_tags():
         except SynologyApiError as fallback_exc:
             status = 502 if fallback_exc.error_code is None else 403
             return jsonify({"ok": False, "error": str(fallback_exc), "error_code": fallback_exc.error_code}), status
+
+
+@app.post("/api/photos/tags/replace-batch")
+def replace_photo_tags_batch():
+    """Replace one existing tag with another on an explicitly selected batch."""
+    nas = current_nas_session()
+    if not nas:
+        return jsonify({"ok": False, "error": "請先登入 Synology Photos。"}), 401
+    payload = request.get_json(silent=True) or {}
+    space = payload.get("space", "personal")
+    source = payload.get("source_tag")
+    destination = payload.get("destination_tag")
+    photo_ids = payload.get("photo_ids")
+    if space not in {"personal", "shared"}:
+        return jsonify({"ok": False, "error": "空間類型無效。"}), 400
+    if not isinstance(source, str) or not source.strip() or not isinstance(destination, str) or not destination.strip():
+        return jsonify({"ok": False, "error": "請選擇來源標籤與目標標籤。"}), 400
+    source, destination = source.strip(), destination.strip()
+    if source.casefold() == destination.casefold():
+        return jsonify({"ok": False, "error": "來源與目標標籤必須不同。"}), 400
+    if not isinstance(photo_ids, list) or not photo_ids or len(photo_ids) > 25:
+        return jsonify({"ok": False, "error": "請選擇 1 至 25 張照片進行本批次更改。"}), 400
+    if any(not isinstance(photo_id, int) or isinstance(photo_id, bool) or photo_id <= 0 for photo_id in photo_ids):
+        return jsonify({"ok": False, "error": "照片項目 ID 格式錯誤。"}), 400
+    photo_ids = list(dict.fromkeys(photo_ids))
+    item_api = "SYNO.Foto.Browse.Item" if space == "personal" else "SYNO.FotoTeam.Browse.Item"
+    tag_api = "SYNO.Foto.Browse.GeneralTag" if space == "personal" else "SYNO.FotoTeam.Browse.GeneralTag"
+    try:
+        item_url, item_version = api_endpoint(nas, item_api)
+        tag_url, _ = api_endpoint(nas, tag_api)
+        # Only operate with existing vocabulary. A typo must not create a new tag.
+        tag_rows = []
+        offset = 0
+        for _ in range(20):
+            listed = post_synology(nas.client, tag_url, {
+                "api": tag_api, "version": 1, "method": "list", "offset": offset,
+                "limit": 1000, "_sid": nas.sid,
+            }).get("data", {})
+            rows = listed.get("list") if isinstance(listed, dict) else None
+            if not isinstance(rows, list):
+                raise SynologyApiError("無法讀取目前空間的標籤清單。")
+            tag_rows.extend(row for row in rows if isinstance(row, dict))
+            offset += len(rows)
+            if len(rows) < 1000:
+                break
+        by_name = {str(row.get("name", "")).strip().casefold(): row for row in tag_rows}
+        source_row = by_name.get(source.casefold())
+        destination_row = by_name.get(destination.casefold())
+        if not source_row or not destination_row:
+            return jsonify({"ok": False, "error": "來源與目標標籤都必須已存在於目前空間。"}), 400
+        source_id, destination_id = source_row.get("id"), destination_row.get("id")
+        if not isinstance(source_id, int) or not isinstance(destination_id, int):
+            return jsonify({"ok": False, "error": "NAS 未回傳標籤 ID；無法安全執行批次更改。"}), 502
+
+        results = []
+        with _tag_replacement_lock:
+            for photo_id in photo_ids:
+                result = {"photo_id": photo_id, "status": "failed", "error": None}
+                destination_may_be_added = False
+                try:
+                    def read_photo_tags() -> list[dict]:
+                        response = post_synology(nas.client, item_url, {
+                            "api": item_api, "version": item_version, "method": "get",
+                            "id": json.dumps([photo_id], separators=(",", ":")),
+                            "additional": json.dumps(["tag"], separators=(",", ":")),
+                            "_sid": nas.sid,
+                        })
+                        data = response.get("data")
+                        items = data.get("list") if isinstance(data, dict) else None
+                        if not isinstance(items, list) or not items or not isinstance(items[0], dict):
+                            raise SynologyApiError("Photos API 找不到照片或帳號無權存取。", 404)
+                        additional = items[0].get("additional")
+                        tags = additional.get("tag") if isinstance(additional, dict) else []
+                        return [tag for tag in tags if isinstance(tag, dict)] if isinstance(tags, list) else []
+
+                    current = read_photo_tags()
+                    names = {str(tag.get("name", "")).strip().casefold() for tag in current}
+                    if source.casefold() not in names:
+                        result.update(status="skipped", error="照片目前沒有來源標籤。")
+                    else:
+                        if destination.casefold() not in names:
+                            destination_may_be_added = True
+                            post_synology(nas.client, item_url, {
+                                "api": item_api, "version": 1, "method": "add_tag",
+                                "id": json.dumps([photo_id], separators=(",", ":")),
+                                "tag": json.dumps([destination_id], separators=(",", ":")),
+                                "_sid": nas.sid,
+                            })
+                            current = read_photo_tags()
+                            names = {str(tag.get("name", "")).strip().casefold() for tag in current}
+                            if destination.casefold() not in names:
+                                raise SynologyApiError("目標標籤新增後讀回未確認；保留來源標籤。")
+                        post_synology(nas.client, item_url, {
+                            "api": item_api, "version": 1, "method": "remove_tag",
+                            "id": json.dumps([photo_id], separators=(",", ":")),
+                            "tag": json.dumps([source_id], separators=(",", ":")),
+                            "_sid": nas.sid,
+                        })
+                        current = read_photo_tags()
+                        names = {str(tag.get("name", "")).strip().casefold() for tag in current}
+                        result["status"] = "verified" if destination.casefold() in names and source.casefold() not in names else "needs_review"
+                        if result["status"] == "needs_review":
+                            result["error"] = "操作已送出，但最終標籤讀回結果不完整。"
+                        else:
+                            owner_key = tag_job_owner_key()
+                            if owner_key:
+                                try:
+                                    record_photo_tagger_tags(owner_key, space, photo_id, [destination])
+                                except sqlite3.Error:
+                                    app.logger.exception("Could not record replaced tag provenance for item %s", photo_id)
+                except SynologyApiError as exc:
+                    result["status"] = "needs_review" if destination_may_be_added else "failed"
+                    result["error"] = str(exc)
+                    result["error_code"] = exc.error_code
+                except Exception:
+                    app.logger.exception("Unexpected tag replacement failure for photo %s", photo_id)
+                    result["status"] = "needs_review" if destination_may_be_added else "failed"
+                    result["error"] = "處理時發生未預期錯誤；請重新讀取照片標籤確認狀態。"
+                results.append(result)
+        counts = {status: sum(result["status"] == status for result in results) for status in ("verified", "skipped", "failed", "needs_review")}
+        return jsonify({"ok": counts["failed"] == 0 and counts["needs_review"] == 0, "space": space, "source_tag": source, "destination_tag": destination, "results": results, "counts": counts})
+    except SynologyApiError as exc:
+        status = 502 if exc.error_code is None else 403
+        return jsonify({"ok": False, "error": str(exc), "error_code": exc.error_code}), status
 
 
 def tag_job_owner_key() -> str | None:

@@ -1,4 +1,4 @@
-# Synology Photo Tagger v0.4.3
+# Synology Photo Tagger v0.4.4
 
 A Python web app for browsing Synology Photos, analyzing candidate photos, and managing reviewed AI tagging jobs.
 
@@ -24,8 +24,9 @@ A Python web app for browsing Synology Photos, analyzing candidate photos, and m
 - Keeps browser login sessions for up to 12 idle hours without saving the NAS password or OTP; a signing key is generated once and kept on the same persistent volume.
 - Marks candidate photos with Photo Tagger-added tags that remain present, including individual writes and reviewed tagging jobs; undone tags are excluded.
 - Distinguishes identity credentials (`證件`) from general documents (`文件`) in AI tag suggestions.
+- Replaces one existing tag with another across all photos carrying the source tag; the affected count is shown before confirmation and writes are processed in chunks of up to 25 with readback verification.
 
-This release includes the v0.4.0 persistent, per-job AI tagging workflow. Jobs snapshot filtered candidates, analyze the shopping task, and present each photo for human review. Users can accept, reject, or choose an existing tag in their selected Photos space; accepting “購物” may create that tag if needed. Nothing is written until the user clicks “寫入已接受項目”. Each accepted photo is updated and read back through the Photos API. Job reports record outcomes; undo removes only tag IDs added by that job. Candidate snapshots are limited to 300 items and 40 source pages and disclose when the scan is incomplete. SQLite stores candidate display fields, analysis summaries, review decisions, and write/undo outcomes in the persistent `tagger-data` named volume. It does not store original photos or OCR output. Existing individual-photo analysis and confirmed description/tag editing remain available. Browser login sessions remain valid for up to 12 idle hours; the signing key persists on `tagger-data`, but NAS passwords and OTP codes are never stored. Restarting the container clears the in-memory NAS API session and may require a new login. The candidate list now identifies tags that Photo Tagger successfully added and that remain on the photo, from both individual writes and reviewed jobs; tags removed by an undone job are excluded. The AI uses `證件` only for formal credentials meant to establish a holder’s identity; reports, forms, receipts, and test results are `文件` or a more specific content tag even when they contain a name or number. Synology Photos API behavior can vary by DSM and Photos version.
+This release includes the v0.4.0 persistent, per-job AI tagging workflow. Jobs snapshot filtered candidates, analyze the shopping task, and present each photo for human review. Users can accept, reject, or choose an existing tag in their selected Photos space; accepting “購物” may create that tag if needed. Nothing is written until the user clicks “寫入已接受項目”. Each accepted photo is updated and read back through the Photos API. Job reports record outcomes; undo removes only tag IDs added by that job. Candidate snapshots are limited to 300 items and 40 source pages and disclose when the scan is incomplete. SQLite stores candidate display fields, analysis summaries, review decisions, and write/undo outcomes in the persistent `tagger-data` named volume. It does not store original photos or OCR output. Existing individual-photo analysis and confirmed description/tag editing remain available. Browser login sessions remain valid for up to 12 idle hours; the signing key persists on `tagger-data`, but NAS passwords and OTP codes are never stored. Restarting the container clears the in-memory NAS API session and may require a new login. The candidate list now identifies tags that Photo Tagger successfully added and that remain on the photo, from both individual writes and reviewed jobs; tags removed by an undone job are excluded. The AI uses `證件` only for formal credentials meant to establish a holder’s identity; reports, forms, receipts, and test results are `文件` or a more specific content tag even when they contain a name or number. v0.4.4 adds explicit batch tag replacement: choose existing source and destination tags, scan all photos carrying the source tag and review the affected count, then confirm. The service processes them in chunks of up to 25, verifying the destination tag before removing and verifying the source tag. Photos API tag operations may modify file metadata. Synology Photos API behavior can vary by DSM and Photos version.
 
 ## Quick start
 
@@ -37,12 +38,12 @@ docker compose up -d
 
 Open `http://localhost:5056/`. Set `SYNOLOGY_URL` to the DSM address reachable from the container. Sign in through the web UI with a Synology account that can access Photos.
 
-The provided Compose file uses the versioned `v0.4.3` image tag. Docker Hub retains only tags in the `vX.Y.Z` format; the publishing workflow removes floating (`latest`), commit (`sha-*`), and non-three-part version tags. Set `MLX_SERVER_URL`, `MLX_SERVER_API_KEY`, and a dedicated Tailscale `TAILSCALE_AUTHKEY` in `.env` to enable analysis. `MLX_OCR_ENGINE` selects `baidu` (default) or `glm` for document OCR. Tailscale node state and AI job records plus the session signing key persist in Docker named volumes.
+The provided Compose file uses the versioned `v0.4.4` image tag. Docker Hub retains only tags in the `vX.Y.Z` format; the publishing workflow removes floating (`latest`), commit (`sha-*`), and non-three-part version tags. Set `MLX_SERVER_URL`, `MLX_SERVER_API_KEY`, and a dedicated Tailscale `TAILSCALE_AUTHKEY` in `.env` to enable analysis. `MLX_OCR_ENGINE` selects `baidu` (default) or `glm` for document OCR. Tailscale node state and AI job records plus the session signing key persist in Docker named volumes.
 
 ## Image
 
 ```sh
-docker pull wenchiehlee1020/synology-photo-tagger:v0.4.3
+docker pull wenchiehlee1020/synology-photo-tagger:v0.4.4
 ```
 
 Source: [GitHub](https://github.com/ZhongZheng782/Synology-Photo-Tagger)
