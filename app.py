@@ -13,6 +13,7 @@ import uuid
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import timedelta
 from urllib.parse import urlencode, urlsplit
 
 import requests
@@ -24,6 +25,7 @@ app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Strict",
     SESSION_COOKIE_SECURE=os.environ.get("APP_HTTPS_ONLY", "false").lower() == "true",
+    PERMANENT_SESSION_LIFETIME=timedelta(hours=12),
 )
 
 API_INFO_PARAMS = {
@@ -34,8 +36,9 @@ API_INFO_PARAMS = {
 }
 API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
+NAS_SESSION_TTL_SECONDS = 12 * 60 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.4.0")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.4.1")
 TAGGER_DB_PATH = os.environ.get(
     "TAGGER_DB_PATH", os.path.join(os.path.dirname(__file__), "data", "photo-tagger.sqlite3")
 )
@@ -294,7 +297,7 @@ def current_nas_session() -> NasSession | None:
         expired_tokens = [
             key
             for key, value in _nas_sessions.items()
-            if now - value.last_used > SESSION_TTL_SECONDS
+            if now - value.last_used > NAS_SESSION_TTL_SECONDS
         ]
         expired_sessions = [_nas_sessions.pop(key) for key in expired_tokens]
         stored = _nas_sessions.get(token)
@@ -756,6 +759,7 @@ def login():
                 last_used=time.monotonic(),
             )
         session.clear()
+        session.permanent = True
         session["nas_session_token"] = token
         session["nas_account"] = username
         return jsonify({"ok": True, "message": "NAS 登入成功。"})

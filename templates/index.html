@@ -81,7 +81,7 @@
       <section class="content-grid auth-grid" id="auth-panel">
         <article class="panel connection-panel">
           <div class="panel-heading"><div><p class="eyebrow">STEP 02 · READ ONLY ACCESS</p><h2>登入並瀏覽候選照片</h2></div><span class="heading-icon">⌕</span></div>
-          <p class="panel-copy">登入後可讀取個人空間或共享空間的照片項目、拍攝時間、地點與既有標籤。密碼不會寫入本專案資料庫或記錄檔。</p>
+          <p class="panel-copy">登入後可讀取個人空間或共享空間的照片項目、拍攝時間、地點與既有標籤。登入狀態會在此瀏覽器保留，閒置 12 小時後失效；NAS 密碼與雙重驗證碼不會被保存。</p>
           <form id="login-form" {% if logged_in %}hidden{% endif %}>
             <label class="field-label" for="nas-username">NAS 帳號</label>
             <input class="text-field" id="nas-username" name="username" autocomplete="username" required>

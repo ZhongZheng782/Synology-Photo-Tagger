@@ -1,6 +1,23 @@
 #!/bin/sh
 set -eu
 
+# Keep Flask's signed browser session stable across container recreation.
+# The file lives on the persistent /data volume; NAS passwords and OTP codes
+# are never written here.
+if [ -z "${APP_SECRET_KEY:-}" ]; then
+    APP_SECRET_KEY_FILE="${APP_SECRET_KEY_FILE:-/data/app-secret-key}"
+    APP_SECRET_KEY_DIR="$(dirname "$APP_SECRET_KEY_FILE")"
+    mkdir -p "$APP_SECRET_KEY_DIR"
+    if [ ! -s "$APP_SECRET_KEY_FILE" ]; then
+        APP_SECRET_KEY_TMP="${APP_SECRET_KEY_FILE}.tmp"
+        (umask 077; python3 -c 'import secrets; print(secrets.token_urlsafe(64))' > "$APP_SECRET_KEY_TMP")
+        mv "$APP_SECRET_KEY_TMP" "$APP_SECRET_KEY_FILE"
+    fi
+    chmod 600 "$APP_SECRET_KEY_FILE"
+    APP_SECRET_KEY="$(cat "$APP_SECRET_KEY_FILE")"
+    export APP_SECRET_KEY
+fi
+
 # Run a dedicated Tailscale node in userspace mode. The HTTP proxy is used only
 # by the MLX request, so Synology API traffic keeps its normal network route.
 mkdir -p /var/run/tailscale /var/lib/tailscale
