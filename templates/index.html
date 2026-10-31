@@ -198,6 +198,17 @@
       authResult.textContent = message;
     }
 
+    async function readApiJson(response) {
+      const raw = await response.text();
+      try {
+        return JSON.parse(raw);
+      } catch {
+        const title = raw.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+        const hint = title ? `：${title.slice(0, 120)}` : '';
+        throw new Error(`服務回傳非 JSON（HTTP ${response.status}${hint}）。`);
+      }
+    }
+
     function renderPhotoTagOptions(select, tags, selectedValue = '') {
       select.replaceChildren();
       select.append(new Option('全部標籤', ''));
@@ -279,7 +290,7 @@
         while (!complete) {
           const params = new URLSearchParams({ space, offset: String(offset), limit: '500' });
           const response = await fetch(`/api/photos/tags?${params}`);
-          const data = await response.json();
+          const data = await readApiJson(response);
           if (requestId !== photoTagsRequestId || space !== document.getElementById('space-select').value) return;
           if (!data.ok) throw new Error(data.error || '標籤讀取失敗。');
           for (const tag of data.tags || []) {
@@ -907,13 +918,13 @@
         let offset = 0;
         let complete = false;
         let lastScanned = -1;
-        const found = new Map();
+        const found = new Set();
         while (!complete) {
           const params = new URLSearchParams({space: document.getElementById('space-select').value, country: '', tag: source, offset: String(offset), limit: '100'});
           const response = await fetch(`/api/photos?${params}`);
-          const data = await response.json();
+          const data = await readApiJson(response);
           if (!data.ok) throw new Error(data.error || '照片掃描失敗。');
-          for (const photo of data.photos || []) if (Number.isInteger(Number(photo.id))) found.set(Number(photo.id), photo);
+          for (const photo of data.photos || []) if (Number.isInteger(Number(photo.id))) found.add(Number(photo.id));
           complete = Boolean(data.search_complete);
           offset = Number(data.next_offset || 0);
           document.getElementById('batch-selection-count').textContent = `已找到 ${found.size} 張 · 已掃描 ${data.scanned_count || 0} 張`;
@@ -921,7 +932,7 @@
           if (!complete && data.scanned_count === lastScanned) throw new Error('掃描沒有前進；請稍後重試。');
           lastScanned = data.scanned_count;
         }
-        batchPhotoIds = [...found.keys()];
+        batchPhotoIds = [...found];
         document.getElementById('batch-selection-count').textContent = `將處理 ${batchPhotoIds.length} 張照片`;
         document.getElementById('batch-replace-tags').disabled = batchPhotoIds.length === 0;
         result.textContent = batchPhotoIds.length
@@ -959,26 +970,36 @@
       document.getElementById('batch-source-tag').disabled = true;
       document.getElementById('batch-destination-tag').disabled = true;
       result.hidden = false;
-      let outcomes = [];
+      let processed = 0;
+      let counts = {verified: 0, skipped: 0, failed: 0, needs_review: 0};
       try {
-        for (let start = 0; start < ids.length; start += 25) {
-          result.textContent = `批次處理中：${Math.min(start + 25, ids.length)} / ${ids.length} 張；新增並確認「${destination}」後，才移除「${source}」。`;
-          const response = await fetch('/api/photos/tags/replace-batch', {
-            method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({space: document.getElementById('space-select').value, source_tag: source, destination_tag: destination, photo_ids: ids.slice(start, start + 25)})
-          });
-          const data = await response.json();
-          if (!data.results) throw new Error(data.error || '批次操作中斷；請重新掃描來源標籤核對剩餘項目。');
-          outcomes.push(...data.results);
+        const startResponse = await fetch('/api/photos/tags/replace-batch', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({space: document.getElementById('space-select').value, source_tag: source, destination_tag: destination, photo_ids: ids})
+        });
+        const started = await readApiJson(startResponse);
+        if (!startResponse.ok || !started.ok || !started.job_id) throw new Error(started.error || `無法啟動批次工作（HTTP ${startResponse.status}）。`);
+        let finished = false;
+        while (!finished) {
+          await new Promise(resolve => window.setTimeout(resolve, 1200));
+          const statusResponse = await fetch(`/api/photos/tags/replace-batch/${encodeURIComponent(started.job_id)}`);
+          const job = await readApiJson(statusResponse);
+          if (!statusResponse.ok || !job.ok) throw new Error(job.error || `無法讀取批次進度（HTTP ${statusResponse.status}）。`);
+          processed = job.processed || 0;
+          counts = job.counts || counts;
+          result.textContent = `批次處理中：${processed} / ${job.total} 張；已確認 ${counts.verified || 0} 張、需核對 ${counts.needs_review || 0} 張。${job.stage ? `\n${job.stage}` : ''}`;
+          finished = ['completed', 'failed'].includes(job.status);
+          if (finished) {
+            const errors = job.errors || [];
+            const details = errors.map(item => `${item.photo_id}: ${item.status}${item.error ? `（${item.error}）` : ''}`).join('\n');
+            result.textContent = `${job.status === 'completed' ? '批次完成' : '批次中斷'}：已核對 ${counts.verified || 0} 張、略過 ${counts.skipped || 0} 張、失敗 ${counts.failed || 0} 張、需人工核對 ${counts.needs_review || 0} 張。${job.error ? `\n工作錯誤：${job.error}` : ''}${details ? `\n${details}` : ''}`;
+          }
         }
-        const counts = Object.fromEntries(['verified', 'skipped', 'failed', 'needs_review'].map(status => [status, outcomes.filter(item => item.status === status).length]));
-        const details = outcomes.filter(item => item.status !== 'verified').map(item => `${item.photo_id}: ${item.status}${item.error ? `（${item.error}）` : ''}`).join('\n');
-        result.textContent = `批次完成：已核對 ${counts.verified} 張、略過 ${counts.skipped} 張、失敗 ${counts.failed} 張、需人工核對 ${counts.needs_review} 張。${details ? `\n${details}` : ''}`;
         batchPhotoIds = [];
         await loadPhotos(photoOffset);
       } catch (error) {
         batchPhotoIds = [];
-        result.textContent = `${error.message || '批次操作失敗'}\n已完成 ${outcomes.filter(item => item.status === 'verified').length} 張；請重新掃描來源標籤再繼續。`;
+        result.textContent = `${error.message || '批次操作失敗'}\n伺服器目前回報已處理 ${processed} 張（確認完成 ${counts.verified || 0} 張）；請重新掃描來源標籤核對尚未完成的照片。`;
       } finally {
         button.disabled = batchPhotoIds.length === 0;
         document.getElementById('batch-load-source').disabled = false;
