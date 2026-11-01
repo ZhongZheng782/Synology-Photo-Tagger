@@ -13,7 +13,7 @@ import uuid
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlencode, urlsplit
 
 import requests
@@ -38,7 +38,7 @@ API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 NAS_SESSION_TTL_SECONDS = 12 * 60 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.4.5")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.4.6")
 TAGGER_DB_PATH = os.environ.get(
     "TAGGER_DB_PATH", os.path.join(os.path.dirname(__file__), "data", "photo-tagger.sqlite3")
 )
@@ -1395,18 +1395,23 @@ def annotate_photo_tagger_tags(
 
 def tag_job_summary(db: sqlite3.Connection, job: sqlite3.Row) -> dict:
     counts = {
-        "candidates": job["candidate_count"], "analyzed": 0, "failed": 0,
+        "candidates": job["candidate_count"], "analyzed": 0, "dry_run": 0, "skipped": 0, "failed": 0, "needs_review": 0,
         "accepted": 0, "rejected": 0, "written": 0, "undone": 0,
     }
     rows = db.execute(
-        "SELECT status, review, undo_status, COUNT(*) AS n FROM tag_job_items "
+        "SELECT status, review, undo_status, COUNT(*) AS n, SUM(analysis_json IS NOT NULL) AS analyzed_n FROM tag_job_items "
         "WHERE job_id=? GROUP BY status, review, undo_status", (job["id"],),
     ).fetchall()
     for row in rows:
-        if row["status"] == "analyzed":
-            counts["analyzed"] += row["n"]
-        if row["status"] in {"failed", "write_uncertain"}:
+        counts["analyzed"] += row["analyzed_n"] or 0
+        if row["status"] == "dry_run":
+            counts["dry_run"] += row["n"]
+        if row["status"] == "skipped":
+            counts["skipped"] += row["n"]
+        if row["status"] == "failed":
             counts["failed"] += row["n"]
+        if row["status"] == "write_uncertain":
+            counts["needs_review"] += row["n"]
         if row["review"] == "accepted":
             counts["accepted"] += row["n"]
         if row["review"] == "rejected":
@@ -1451,21 +1456,56 @@ def tag_job_detail_payload(db: sqlite3.Connection, owner_key: str, job_id: str) 
     return {"job": tag_job_summary(db, job), "items": items}
 
 
-def matching_job_photos(index: PhotoLibraryIndex, country: str, tag_filter: str) -> list[dict]:
+def photo_taken_date(photo: dict) -> date | None:
+    value = photo.get("time")
+    app_timezone = timezone(timedelta(hours=8))
+    try:
+        if isinstance(value, (int, float)):
+            timestamp = float(value)
+            if timestamp > 100_000_000_000:
+                timestamp /= 1000
+            return datetime.fromtimestamp(timestamp, app_timezone).date()
+        if isinstance(value, str) and value.strip():
+            text = value.strip()
+            try:
+                timestamp = float(text)
+            except ValueError:
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=app_timezone)
+                return parsed.astimezone(app_timezone).date()
+            if timestamp > 100_000_000_000:
+                timestamp /= 1000
+            return datetime.fromtimestamp(timestamp, app_timezone).date()
+    except (OverflowError, OSError, ValueError):
+        return None
+    return None
+
+
+def matching_job_photos_by_criteria(index: PhotoLibraryIndex, criteria: dict) -> list[dict]:
     matches = []
+    country = criteria.get("country", "")
+    selected_tags = set(criteria.get("tags") or [])
+    date_from = date.fromisoformat(criteria["date_from"]) if criteria.get("date_from") else None
+    date_to = date.fromisoformat(criteria["date_to"]) if criteria.get("date_to") else None
     for photo in index.photos:
         if country == "japan" and not is_japan(photo):
             continue
-        tags = [str(tag) for tag in photo.get("tags", [])]
-        if tag_filter == "__untagged__" and tags:
+        photo_tags = {str(tag) for tag in photo.get("tags", [])}
+        if selected_tags == {"__untagged__"} and photo_tags:
             continue
-        if tag_filter and tag_filter != "__untagged__" and tag_filter not in tags:
+        if selected_tags and "__untagged__" not in selected_tags and not (selected_tags & photo_tags):
             continue
+        if date_from or date_to:
+            taken_date = photo_taken_date(photo)
+            if taken_date is None or (date_from and taken_date < date_from) or (date_to and taken_date > date_to):
+                continue
         matches.append(photo)
     return matches
 
 
-def prepare_tag_job(job_id: str, owner_key: str, nas_token: str, space: str, country: str, tag_filter: str, max_candidates: int) -> None:
+def prepare_tag_job(job_id: str, owner_key: str, nas_token: str, space: str, criteria: dict) -> None:
+    max_candidates = int(criteria["max_candidates"])
     try:
         with app.test_request_context("/"):
             session["nas_session_token"] = nas_token
@@ -1476,7 +1516,7 @@ def prepare_tag_job(job_id: str, owner_key: str, nas_token: str, space: str, cou
             url, version = api_endpoint(nas, api_name)
             index = photo_library_index(nas_token, space)
             for _ in range(TAG_JOB_MAX_SCAN_PAGES):
-                matches = matching_job_photos(index, country, tag_filter)
+                matches = matching_job_photos_by_criteria(index, criteria)
                 if index.complete or len(matches) > max_candidates:
                     break
                 scan_photo_library_page(nas, api_name, url, version, index)
@@ -1485,12 +1525,24 @@ def prepare_tag_job(job_id: str, owner_key: str, nas_token: str, space: str, cou
                         "UPDATE tag_jobs SET scanned_count=?, updated_at=? WHERE id=? AND owner_key=?",
                         (index.source_offset, time.time(), job_id, owner_key),
                     )
-            matches = matching_job_photos(index, country, tag_filter)
+            matches = matching_job_photos_by_criteria(index, criteria)
             selected = matches[:max_candidates]
             truncated = len(matches) > max_candidates or not index.complete
+            if len(matches) > max_candidates:
+                snapshot_warning = (
+                    f"目前已找到至少 {len(matches)} 張符合照片；工作上限為 {max_candidates} 張，"
+                    f"此快照使用前 {max_candidates} 張，未完整掃描其餘照片。"
+                )
+            elif not index.complete:
+                snapshot_warning = (
+                    f"已掃描 {index.source_offset} 個來源項目並找到 {len(matches)} 張符合照片；"
+                    "NAS 清單尚未掃描完成，候選快照可能不完整。"
+                )
+            else:
+                snapshot_warning = None
             snapshot_fields = (
                 "id", "filename", "thumbnail_ready", "thumbnail_cache_key",
-                "thumbnail_unit_id", "thumbnail_size", "taken_at", "time", "tags",
+                "thumbnail_unit_id", "thumbnail_size", "taken_at", "time", "country", "city", "tags",
             )
             with tag_job_db() as db:
                 db.executemany(
@@ -1507,7 +1559,7 @@ def prepare_tag_job(job_id: str, owner_key: str, nas_token: str, space: str, cou
                     "WHERE id=? AND owner_key=?",
                     (len(selected), int(not truncated), index.source_offset,
                      "ready" if selected else "empty",
-                     "候選範圍已達掃描上限；此工作快照可能不含全部符合照片。" if truncated else None,
+                     snapshot_warning,
                      time.time(), job_id, owner_key),
                 )
     except Exception as exc:
@@ -1545,19 +1597,39 @@ def create_tag_job():
     space = body.get("space", "personal")
     country = body.get("country", "japan")
     tag_filter = body.get("tag", "")
-    task = body.get("task", "shopping")
+    raw_tags = body.get("tags", [tag_filter] if tag_filter else [])
+    date_from_raw = body.get("date_from", "")
+    date_to_raw = body.get("date_to", "")
+    task = body.get("task", "photo")
+    dry_run = body.get("dry_run") is True
     try:
         max_candidates = int(body.get("max_candidates", 100))
     except (TypeError, ValueError):
         return jsonify({"ok": False, "error": "候選照片上限格式無效。"}), 400
     if not isinstance(space, str) or space not in {"personal", "shared"} or not isinstance(country, str) or country not in {"", "japan"}:
         return jsonify({"ok": False, "error": "目前只支援個人／共享空間及日本地點篩選。"}), 400
-    if not isinstance(tag_filter, str) or len(tag_filter) > 64:
+    if not isinstance(raw_tags, list) or len(raw_tags) > 30 or any(not isinstance(tag, str) for tag in raw_tags):
         return jsonify({"ok": False, "error": "標籤條件格式無效。"}), 400
-    if not country and not tag_filter:
-        return jsonify({"ok": False, "error": "請至少指定日本地點或既有標籤，避免掃描整個相片庫。"}), 400
-    if task != "shopping":
-        return jsonify({"ok": False, "error": "目前 AI 標記工作只支援『購物』任務。"}), 400
+    tags = list(dict.fromkeys(tag.strip() for tag in raw_tags if tag.strip()))
+    if any(len(tag) > 64 for tag in tags):
+        return jsonify({"ok": False, "error": "每個標籤條件不可超過 64 個字元。"}), 400
+    if "__untagged__" in tags and len(tags) > 1:
+        return jsonify({"ok": False, "error": "「未加標籤」不能與其他標籤同時選擇。"}), 400
+    if not isinstance(date_from_raw, str) or not isinstance(date_to_raw, str):
+        return jsonify({"ok": False, "error": "日期條件格式無效。"}), 400
+    date_from = date_from_raw.strip()
+    date_to = date_to_raw.strip()
+    try:
+        parsed_from = date.fromisoformat(date_from) if date_from else None
+        parsed_to = date.fromisoformat(date_to) if date_to else None
+    except ValueError:
+        return jsonify({"ok": False, "error": "日期請使用 YYYY-MM-DD 格式。"}), 400
+    if parsed_from and parsed_to and parsed_from > parsed_to:
+        return jsonify({"ok": False, "error": "開始日期不可晚於結束日期。"}), 400
+    if not country and not tags and not date_from and not date_to:
+        return jsonify({"ok": False, "error": "請至少設定地點、日期或既有標籤條件。"}), 400
+    if task != "photo":
+        return jsonify({"ok": False, "error": "AI 標記工作類型無效。"}), 400
     if max_candidates < 1 or max_candidates > TAG_JOB_MAX_CANDIDATES:
         return jsonify({"ok": False, "error": f"每個工作最多選取 {TAG_JOB_MAX_CANDIDATES} 張照片。"}), 400
     with tag_job_db() as db:
@@ -1569,7 +1641,14 @@ def create_tag_job():
             return jsonify({"ok": False, "error": "目前已有 4 個標記工作在處理，請等候完成。"}), 429
         job_id = uuid.uuid4().hex
         now = time.time()
-        criteria = {"country": country, "tag": tag_filter, "max_candidates": max_candidates}
+        criteria = {
+            "country": country,
+            "tags": tags,
+            "date_from": date_from,
+            "date_to": date_to,
+            "max_candidates": max_candidates,
+            "dry_run": dry_run,
+        }
         db.execute(
             "INSERT INTO tag_jobs(id, owner_key, space, task, criteria_json, status, created_at, updated_at) "
             "VALUES(?,?,?,?,?,'preparing',?,?)",
@@ -1578,7 +1657,7 @@ def create_tag_job():
     try:
         _photo_analysis_executor.submit(
             prepare_tag_job, job_id, owner_key, session.get("nas_session_token"),
-            space, country, tag_filter, max_candidates,
+            space, criteria,
         )
     except Exception:
         with tag_job_db() as db:
@@ -1633,6 +1712,8 @@ def run_tag_job_analysis(job_id: str, owner_key: str, nas_token: str) -> None:
             if not job:
                 return
             space = job["space"]
+            criteria = json.loads(job["criteria_json"])
+            dry_run = criteria.get("dry_run") is True
             rows = db.execute(
                 "SELECT * FROM tag_job_items WHERE job_id=? AND status='queued' ORDER BY photo_id", (job_id,)
             ).fetchall()
@@ -1645,7 +1726,7 @@ def run_tag_job_analysis(job_id: str, owner_key: str, nas_token: str) -> None:
                     (time.time(), job_id, photo_id),
                 )
             query = urlencode({
-                "space": space, "task": "shopping",
+                "space": space, "task": "photo",
                 "cache_key": photo.get("thumbnail_cache_key") or "",
                 "unit_id": photo.get("thumbnail_unit_id") or photo_id,
             })
@@ -1663,45 +1744,91 @@ def run_tag_job_analysis(job_id: str, owner_key: str, nas_token: str) -> None:
                     )
                 continue
             analysis = payload.get("analysis") if isinstance(payload.get("analysis"), dict) else {}
-            confidence = analysis.get("confidence")
-            try:
-                confidence = max(0.0, min(1.0, float(confidence)))
-            except (TypeError, ValueError):
-                confidence = 0.0
+            if not analysis or (not analysis.get("description") and not analysis.get("tags")):
+                with tag_job_db() as db:
+                    db.execute(
+                        "UPDATE tag_job_items SET status='skipped', error='AI 回應未提供可用描述或標籤；未寫入。', updated_at=? WHERE job_id=? AND photo_id=?",
+                        (time.time(), job_id, photo_id),
+                    )
+                continue
             safe_result = {
-                "task_relevant": analysis.get("task_relevant") is True,
-                "confidence": confidence,
-                "evidence": [str(value)[:200] for value in analysis.get("evidence", [])[:6]]
-                    if isinstance(analysis.get("evidence"), list) else [],
                 "description": str(analysis.get("description") or "")[:1000],
+                "tags": [str(value)[:64] for value in analysis.get("tags", [])[:8]
+                         if isinstance(value, str) and value.strip()],
                 "model": payload.get("model"),
                 "elapsed_s": payload.get("elapsed_s"),
                 "format": payload.get("format"),
             }
-            recommendation = "review" if safe_result["task_relevant"] and confidence >= 0.60 else "skip"
+            existing_description = payload.get("existing_description")
+            has_existing_description = isinstance(existing_description, str) and bool(existing_description.strip())
+            description_would_be_skipped = bool(
+                safe_result["description"] and has_existing_description
+                and safe_result["description"] != existing_description
+            )
             with tag_job_db() as db:
                 db.execute(
-                    "UPDATE tag_job_items SET status='analyzed', review=?, reviewed_tag=?, analysis_json=?, error=NULL, updated_at=? WHERE job_id=? AND photo_id=?",
-                    (recommendation, "購物" if recommendation == "review" else None,
-                     json.dumps(safe_result, ensure_ascii=False), time.time(), job_id, photo_id),
+                    "UPDATE tag_job_items SET status=?, review=?, reviewed_tag=?, analysis_json=?, error=NULL, updated_at=? WHERE job_id=? AND photo_id=?",
+                    ("dry_run" if dry_run else "writing", "pending", None, json.dumps(safe_result, ensure_ascii=False), time.time(), job_id, photo_id),
+                )
+            if dry_run:
+                safe_write = {
+                    "ok": True,
+                    "dry_run": True,
+                    "would_write_description": bool(safe_result["description"] and not has_existing_description),
+                    "description_skipped_existing": description_would_be_skipped,
+                    "description_already_matches": bool(safe_result["description"] and safe_result["description"] == existing_description),
+                    "would_add_tags": safe_result["tags"],
+                }
+                state = "dry_run"
+            else:
+                result = call_job_write_analysis_route(
+                    nas_token, space, photo_id, safe_result["description"], safe_result["tags"]
+                )
+                safe_write = {
+                    "ok": result.get("ok") is True,
+                    "description_verified": result.get("description_verified") is True,
+                    "description_skipped_existing": result.get("description_skipped_existing") is True,
+                    "tags_added": result.get("tags_added", []),
+                    "tags_already_present": result.get("tags_already_present", []),
+                    "tags_verified": result.get("tags_verified") is True,
+                    "error": (
+                        result.get("error") or result.get("description_error")
+                        or result.get("tags_error") or result.get("readback_error")
+                        or ("Photos API 寫入結果未能通過讀回核對。" if result.get("ok") is not True else None)
+                    ),
+                }
+                state = "written" if safe_write["ok"] else "write_uncertain"
+            with tag_job_db() as db:
+                db.execute(
+                    "UPDATE tag_job_items SET status=?, write_json=?, error=?, updated_at=? WHERE job_id=? AND photo_id=?",
+                    (state, json.dumps(safe_write, ensure_ascii=False), safe_write.get("error"), time.time(), job_id, photo_id),
                 )
         with tag_job_db() as db:
             counts = db.execute(
-                "SELECT SUM(status='queued') AS queued, SUM(status='running') AS running, SUM(status='failed') AS failed "
+                "SELECT SUM(status='queued') AS queued, SUM(status='running') AS running, SUM(status='writing') AS writing, SUM(status='failed') AS failed, SUM(status='write_uncertain') AS uncertain "
                 "FROM tag_job_items WHERE job_id=?", (job_id,),
             ).fetchone()
-            status = "review" if not (counts["queued"] or counts["running"]) else "analyzing"
-            error = "部分照片分析失敗；可安全重跑失敗項目。" if counts["failed"] else None
+            status = (
+                "analyzing" if counts["queued"] or counts["running"] or counts["writing"] else
+                "needs_attention" if counts["failed"] or counts["uncertain"] else
+                "dry_run" if dry_run else "written"
+            )
+            error = "部分照片需要核對；可安全重跑分析失敗項目。" if counts["failed"] or counts["uncertain"] else None
             db.execute("UPDATE tag_jobs SET status=?, error=?, updated_at=? WHERE id=?", (status, error, time.time(), job_id))
     except Exception:
         app.logger.exception("AI tagging job analysis failed: %s", job_id)
         with tag_job_db() as db:
             db.execute(
+                "UPDATE tag_job_items SET status='write_uncertain', error='寫入回應中斷；請先在 Synology Photos 核對，勿直接重試。', updated_at=? "
+                "WHERE job_id=? AND status='writing'",
+                (time.time(), job_id),
+            )
+            db.execute(
                 "UPDATE tag_job_items SET status='failed', error='分析期間工作中斷；可安全重跑。', updated_at=? "
                 "WHERE job_id=? AND status IN ('queued','running')",
                 (time.time(), job_id),
             )
-            db.execute("UPDATE tag_jobs SET status='failed', error='工作分析發生未預期錯誤。', updated_at=? WHERE id=?", (time.time(), job_id))
+            db.execute("UPDATE tag_jobs SET status='needs_attention', error='工作中斷；請查看逐張狀態，不確定的寫入不可直接重試。', updated_at=? WHERE id=?", (time.time(), job_id))
 
 
 @app.post("/api/tag-jobs/<job_id>/analyze")
@@ -1783,6 +1910,27 @@ def call_job_write_route(nas_token: str, space: str, photo_id: int, tag_name: st
     with app.test_request_context(
         f"/api/photos/{photo_id}/write-analysis?{urlencode({'space': space})}",
         method="POST", json={"confirmed": True, "description": "", "tags": [tag_name]},
+    ):
+        session["nas_session_token"] = nas_token
+        response = write_photo_analysis(photo_id)
+    response_object, status_code = response if isinstance(response, tuple) else (response, 200)
+    result = response_object.get_json(silent=True) if isinstance(response_object, Response) else {}
+    return {**(result if isinstance(result, dict) else {}), "http_status": status_code}
+
+
+def call_job_write_analysis_route(
+    nas_token: str, space: str, photo_id: int, description: str, tags: list[str]
+) -> dict:
+    """Write a validated AI result without replacing a user's existing description."""
+    with app.test_request_context(
+        f"/api/photos/{photo_id}/write-analysis?{urlencode({'space': space})}",
+        method="POST",
+        json={
+            "confirmed": True,
+            "description": description,
+            "tags": tags,
+            "preserve_existing_description": True,
+        },
     ):
         session["nas_session_token"] = nas_token
         response = write_photo_analysis(photo_id)
@@ -2651,6 +2799,7 @@ def write_photo_analysis(photo_id: int):
     if not isinstance(tags, list) or len(tags) > 30 or any(not isinstance(tag, str) for tag in tags):
         return jsonify({"ok": False, "error": "標籤必須是最多 30 個文字項目。"}), 400
     clean_description = description.strip()
+    preserve_existing_description = payload.get("preserve_existing_description") is True
     clean_tags = []
     seen_tags = set()
     for raw_tag in tags:
@@ -2741,7 +2890,11 @@ def write_photo_analysis(photo_id: int):
             tags_error_code = exc.error_code
             tags_error_details = exc.error_details
 
-    description_requested = bool(clean_description)
+    description_skipped_existing = bool(
+        preserve_existing_description and clean_description and existing_description.strip()
+        and clean_description != existing_description
+    )
+    description_requested = bool(clean_description) and not description_skipped_existing
     if description_requested and clean_description == existing_description:
         description_succeeded = True
     elif description_requested:
@@ -2794,7 +2947,10 @@ def write_photo_analysis(photo_id: int):
             "tags_error_details": tags_error_details,
         }), 502
 
-    description_verified = not description_requested or after_description == clean_description
+    description_verified = (
+        (not description_requested and (not description_skipped_existing or after_description == existing_description))
+        or (description_requested and after_description == clean_description)
+    )
     verified_tag_names = {name.casefold() for name in after_tag_names}
     tags_verified = all(tag.casefold() in verified_tag_names for tag in clean_tags)
     after_tag_ids_by_name = {
@@ -2808,7 +2964,8 @@ def write_photo_analysis(photo_id: int):
         if tags_succeeded and isinstance(after_tag_ids_by_name.get(tag.casefold()), int)
     ]
     success = (
-        (not description_requested or (description_succeeded and description_verified))
+        ((not description_requested) or (description_succeeded and description_verified))
+        and (not description_skipped_existing or description_verified)
         and tags_succeeded
         and tags_verified
     )
@@ -2825,6 +2982,7 @@ def write_photo_analysis(photo_id: int):
         "space": space,
         "description_api_succeeded": description_succeeded,
         "description_verified": description_verified,
+        "description_skipped_existing": description_skipped_existing,
         "description_replaced_existing": bool(description_requested and existing_description and clean_description != existing_description),
         "tags_api_succeeded": tags_succeeded,
         "tags_requested": clean_tags,
