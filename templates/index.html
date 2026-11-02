@@ -20,8 +20,8 @@
 
       <div class="nav-label">工作區</div>
       <nav class="main-nav" aria-label="主要導覽">
-        <a class="nav-item active" href="#photo-sources"><span class="nav-icon">⌁</span>照片來源</a>
-        <a class="nav-item" href="#tag-job-workspace"><span class="nav-icon">✳</span>AI 標記工作</a>
+        <a class="nav-item active" href="#photo-sources"><span class="nav-icon">⌁</span>照片庫</a>
+        <a class="nav-item" href="#tag-job-workspace"><span class="nav-icon">✳</span>建立工作</a>
         <a class="nav-item" href="#work-results"><span class="nav-icon">☷</span>工作結果</a>
         <a class="nav-item" href="#settings"><span class="nav-icon">⚙</span>設定</a>
       </nav>
@@ -34,13 +34,13 @@
 
     <main class="main-content" id="app-main">
       <header class="topbar">
-        <div class="breadcrumb">工作區 <span>/</span> <strong id="current-page-label">照片來源</strong></div>
+        <div class="breadcrumb">工作區 <span>/</span> <strong id="current-page-label">照片庫</strong></div>
         <div class="topbar-right"><span class="local-badge"><span class="live-dot"></span>本機服務</span><span class="avatar">PT</span></div>
       </header>
       <section class="photo-source-page" id="photo-sources">
       <section class="content-grid auth-grid" id="auth-panel">
         <article class="panel connection-panel">
-          <div class="panel-heading"><div><p class="eyebrow">STEP 02 · READ ONLY ACCESS</p><h2>登入並瀏覽候選照片</h2></div><span class="heading-icon">⌕</span></div>
+          <div class="panel-heading"><div><h2>登入並瀏覽照片庫</h2></div><span class="heading-icon">⌕</span></div>
           <p class="panel-copy">登入後可讀取個人空間或共享空間的照片項目、拍攝時間、地點與既有標籤。登入狀態會在此瀏覽器保留，閒置 12 小時後失效；NAS 密碼與雙重驗證碼不會被保存。</p>
           <form id="login-form" {% if logged_in %}hidden{% endif %}>
             <label class="field-label" for="nas-username">NAS 帳號</label>
@@ -58,11 +58,11 @@
           <div class="security-hint"><strong>連線提醒</strong><span>瀏覽器到此 Web UI 使用 HTTP。請只在可信任的區域網路或 SSH tunnel 中輸入 NAS 密碼；瀏覽器到 NAS API 的連線使用已驗證的 HTTPS。</span></div>
           <div class="result-box" id="auth-result" hidden aria-live="polite"></div>
         </article>
-        <aside class="mini-panel privacy-panel browse-note"><div class="privacy-heading"><span>◈</span><strong>AI 分析後自動寫入並核對</strong></div><p>有效描述與標籤會透過 Photos API 寫入並讀回；已有描述會保留，只略過描述更新。Photos API 寫入可能更新原始檔 metadata。</p><div class="privacy-foot"><span></span>每頁最多 100 張</div></aside>
+        <aside class="mini-panel privacy-panel browse-note"><div class="privacy-heading"><span>◈</span><strong>照片瀏覽與單張操作</strong></div><p>此處的地點與標籤只篩選畫面清單。單張 AI 分析可從照片卡片啟動；批次 AI 標記與批次標籤更名請至「建立工作」。</p><div class="privacy-foot"><span></span>每頁最多 100 張</div></aside>
       </section>
 
       <section class="module-panel photo-panel" id="photo-browser" {% if not logged_in %}hidden{% endif %}>
-        <div class="module-heading"><div><p class="eyebrow">PHOTO CANDIDATES</p><h2>照片候選清單</h2></div><span class="module-count" id="photo-count">尚未載入</span></div>
+        <div class="module-heading"><div><p class="eyebrow">PHOTO LIBRARY</p><h2>照片清單</h2></div><span class="module-count" id="photo-count">尚未載入</span></div>
         <div class="photo-controls">
           <label>空間<select id="space-select"><option value="personal">個人空間</option><option value="shared">共享空間</option></select></label>
           <label>地點<select id="country-select"><option value="">全部地點</option><option value="japan">日本</option></select></label>
@@ -77,24 +77,19 @@
           <p>標籤來自目前所選 Synology Photos 空間；使用項目數可協助辨認常用詞與待整理詞彙。</p>
           <div class="tag-inventory-list" id="tag-inventory-list"></div>
         </details>
-        <section class="batch-tag-panel" aria-label="批次更改標籤">
-          <div><strong>批次更改標籤</strong><p>掃描所選空間內所有帶有來源標籤的照片，先查看影響筆數，再批次更改。Photos API 標籤寫入可能改變照片檔案 metadata。</p></div>
-          <label>來源標籤<select id="batch-source-tag" disabled><option value="">先載入標籤</option></select></label>
-          <label>目標標籤<select id="batch-destination-tag" disabled><option value="">先載入標籤</option></select></label>
-          <button class="secondary-button" id="batch-load-source" type="button" disabled>掃描來源照片</button>
-          <div class="batch-tag-actions" id="batch-tag-actions" hidden>
-            <span id="batch-selection-count">尚未掃描</span>
-            <button class="primary-button" id="batch-replace-tags" type="button" disabled>確認批次更改</button>
-          </div>
-          <div class="batch-tag-result" id="batch-tag-result" hidden role="status" aria-live="polite"></div>
-        </section>
         <div class="photo-list" id="photo-list" aria-live="polite"><div class="photo-empty">登入後載入照片清單。</div></div>
         <div class="photo-pagination"><span id="page-label">—</span><div><button class="secondary-button" id="prev-page" type="button" disabled>上一頁</button><button class="secondary-button" id="next-page" type="button" disabled>下一頁</button></div></div>
       </section>
       </section>
 
       <section class="module-panel tag-job-panel" id="tag-job-workspace" {% if not logged_in %}hidden{% endif %}>
-        <div class="module-heading"><div><p class="eyebrow">AI TAGGING WORK</p><h2>建立 AI 標記工作</h2></div><span class="module-count">目前功能驗證</span></div>
+        <div class="module-heading"><div><p class="eyebrow">CREATE WORK</p><h2>建立工作</h2></div><span class="module-count">AI 標記與標籤整理</span></div>
+        <p class="module-intro">選擇工作類型後設定條件。AI 標記工作依條件建立獨立候選快照；照片庫目前顯示的清單不會自動帶入。</p>
+        <div class="work-type-switcher" role="group" aria-label="工作類型">
+          <button class="work-type-button active" type="button" data-work-type="ai">AI 標記</button>
+          <button class="work-type-button" type="button" data-work-type="tag-replacement">批次更改標籤</button>
+        </div>
+        <div id="ai-tag-job-form">
         <p class="module-intro">依地點、日期與既有標籤建立候選快照。有效結果會自動透過 Synology Photos API 寫入並讀回核對；Dry run 僅產生預覽。已有描述會保留，標籤寫入可能更新原始檔 metadata。</p>
         <div class="tag-job-controls tag-job-filter-controls">
           <label>照片空間<select id="tag-job-space"><option value="personal">個人空間</option><option value="shared">共享空間</option></select></label>
@@ -110,10 +105,30 @@
           <button class="primary-button" id="create-tag-job" type="button">預覽候選並建立快照</button>
         </div>
         <div class="tag-job-notice" id="tag-job-notice" hidden role="status" aria-live="polite"></div>
+        </div>
+        <div id="tag-replacement-work-form" hidden>
+          <section class="batch-tag-panel" aria-label="批次更改標籤">
+            <div><strong>批次更改標籤</strong><p>將所選空間內所有帶有來源標籤的照片改為目標標籤。先掃描並確認影響筆數，再執行；Photos API 寫入可能更新原始檔 metadata。</p></div>
+            <label>照片空間<select id="batch-space-select"><option value="personal">個人空間</option><option value="shared">共享空間</option></select></label>
+            <label>來源標籤<select id="batch-source-tag" disabled><option value="">先載入標籤</option></select></label>
+            <label>目標標籤<select id="batch-destination-tag" disabled><option value="">先載入標籤</option></select></label>
+            <button class="secondary-button" id="load-batch-tags" type="button">載入標籤</button>
+            <button class="secondary-button" id="batch-load-source" type="button" disabled>掃描來源照片</button>
+            <div class="batch-tag-actions" id="batch-tag-actions" hidden>
+              <span id="batch-selection-count">尚未掃描</span>
+              <button class="primary-button" id="batch-replace-tags" type="button" disabled>確認批次更改</button>
+            </div>
+            <div class="batch-tag-result" id="batch-tag-result" hidden role="status" aria-live="polite"></div>
+          </section>
+        </div>
       </section>
 
       <section class="module-panel tag-job-panel" id="work-results" {% if not logged_in %}hidden{% endif %}>
-        <div class="module-heading"><div><p class="eyebrow">WORK RESULTS</p><h2>工作結果</h2></div><span class="module-count">分析、寫入與核對狀態</span></div>
+        <div class="module-heading"><div><p class="eyebrow">WORK RESULTS</p><h2>工作結果</h2></div><span class="module-count">AI 標記與批次標籤更改</span></div>
+        <section class="tag-job-detail batch-result-section" id="batch-result-section" hidden>
+          <div class="module-heading"><div><p class="eyebrow">TAG REPLACEMENT</p><h3>批次更改標籤進度</h3></div></div>
+          <div class="batch-tag-result" id="batch-job-progress" role="status" aria-live="polite"></div>
+        </section>
         <div class="tag-job-list" id="tag-job-list"><p class="photo-empty">登入後即可建立與查看標記工作。</p></div>
         <section class="tag-job-detail" id="tag-job-detail" hidden>
           <div class="module-heading"><div><p class="eyebrow">JOB DETAILS</p><h3 id="tag-job-title">標記工作</h3></div><button class="secondary-button" id="close-tag-job" type="button">返回工作清單</button></div>
@@ -297,15 +312,6 @@
           const orderedTags = [...tags.values()].sort((a, b) => a.name.localeCompare(b.name, 'zh-Hant'));
           renderPhotoTagOptions(select, orderedTags, selectedValue);
           renderTagInventory(orderedTags, complete);
-          for (const id of ['batch-source-tag', 'batch-destination-tag']) {
-            const batchSelect = document.getElementById(id);
-            const previous = batchSelect.value;
-            batchSelect.replaceChildren(new Option('選擇標籤', ''));
-            for (const tag of orderedTags) batchSelect.append(new Option(tag.name, tag.name));
-            batchSelect.disabled = false;
-            batchSelect.value = [...batchSelect.options].some(option => option.value === previous) ? previous : '';
-          }
-          document.getElementById('batch-load-source').disabled = false;
           button.textContent = complete ? `標籤 ${tags.size} 個` : `讀取中 ${tags.size} 個`;
           if (!complete) await new Promise(resolve => window.setTimeout(resolve, 120));
         }
@@ -319,6 +325,69 @@
         if (requestId === photoTagsRequestId) button.disabled = false;
       }
     }
+
+    async function loadBatchTags() {
+      const space = document.getElementById('batch-space-select').value;
+      const selects = ['batch-source-tag', 'batch-destination-tag'].map(id => document.getElementById(id));
+      const button = document.getElementById('load-batch-tags');
+      const previous = selects.map(select => select.value);
+      button.disabled = true;
+      button.textContent = '正在載入…';
+      selects.forEach(select => { select.disabled = true; });
+      try {
+        const tags = new Map();
+        let offset = 0;
+        let complete = false;
+        while (!complete) {
+          const params = new URLSearchParams({space, offset: String(offset), limit: '500'});
+          const response = await fetch(`/api/photos/tags?${params}`);
+          const data = await readApiJson(response);
+          if (!data.ok) throw new Error(data.error || '標籤讀取失敗。');
+          for (const tag of data.tags || []) {
+            const name = typeof tag === 'string' ? tag : tag.name;
+            if (name) tags.set(name, name);
+          }
+          offset = Number(data.next_offset ?? offset + (data.tags || []).length);
+          complete = data.complete === true;
+        }
+        for (const [index, select] of selects.entries()) {
+          select.replaceChildren(new Option('選擇標籤', ''));
+          for (const name of [...tags.keys()].sort((a, b) => a.localeCompare(b, 'zh-Hant'))) select.append(new Option(name, name));
+          select.disabled = false;
+          select.value = [...select.options].some(option => option.value === previous[index]) ? previous[index] : '';
+        }
+        button.textContent = `標籤 ${tags.size} 個`;
+        document.getElementById('batch-load-source').disabled = false;
+      } catch (error) {
+        button.textContent = error.message || '載入標籤失敗';
+        selects.forEach(select => { select.disabled = false; });
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    function setBatchWorkType(type) {
+      const isReplacement = type === 'tag-replacement';
+      document.getElementById('ai-tag-job-form').hidden = isReplacement;
+      document.getElementById('tag-replacement-work-form').hidden = !isReplacement;
+      document.querySelectorAll('[data-work-type]').forEach(button => {
+        const active = button.dataset.workType === type;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-pressed', String(active));
+      });
+    }
+    document.querySelectorAll('[data-work-type]').forEach(button => button.addEventListener('click', () => setBatchWorkType(button.dataset.workType)));
+    document.getElementById('load-batch-tags')?.addEventListener('click', loadBatchTags);
+    document.getElementById('batch-space-select')?.addEventListener('change', () => {
+      batchPhotoIds = [];
+      document.getElementById('batch-tag-actions').hidden = true;
+      document.getElementById('batch-source-tag').replaceChildren(new Option('先載入標籤', ''));
+      document.getElementById('batch-destination-tag').replaceChildren(new Option('先載入標籤', ''));
+      document.getElementById('batch-source-tag').disabled = true;
+      document.getElementById('batch-destination-tag').disabled = true;
+      document.getElementById('batch-load-source').disabled = true;
+      document.getElementById('load-batch-tags').textContent = '載入標籤';
+    });
 
     async function loadTagJobTags() {
       const space = document.getElementById('tag-job-space').value;
@@ -883,7 +952,7 @@
         let lastScanned = -1;
         const found = new Set();
         while (!complete) {
-          const params = new URLSearchParams({space: document.getElementById('space-select').value, country: '', tag: source, offset: String(offset), limit: '100'});
+          const params = new URLSearchParams({space: document.getElementById('batch-space-select').value, country: '', tag: source, offset: String(offset), limit: '100'});
           const response = await fetch(`/api/photos?${params}`);
           const data = await readApiJson(response);
           if (!data.ok) throw new Error(data.error || '照片掃描失敗。');
@@ -924,6 +993,8 @@
     document.getElementById('batch-replace-tags')?.addEventListener('click', async () => {
       const button = document.getElementById('batch-replace-tags');
       const result = document.getElementById('batch-tag-result');
+      const resultSection = document.getElementById('batch-result-section');
+      const progress = document.getElementById('batch-job-progress');
       const source = document.getElementById('batch-source-tag').value;
       const destination = document.getElementById('batch-destination-tag').value;
       const ids = [...batchPhotoIds];
@@ -938,10 +1009,12 @@
       try {
         const startResponse = await fetch('/api/photos/tags/replace-batch', {
           method: 'POST', headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({space: document.getElementById('space-select').value, source_tag: source, destination_tag: destination, photo_ids: ids})
+          body: JSON.stringify({space: document.getElementById('batch-space-select').value, source_tag: source, destination_tag: destination, photo_ids: ids})
         });
         const started = await readApiJson(startResponse);
         if (!startResponse.ok || !started.ok || !started.job_id) throw new Error(started.error || `無法啟動批次工作（HTTP ${startResponse.status}）。`);
+        resultSection.hidden = false;
+        resultSection.scrollIntoView({behavior: 'smooth', block: 'start'});
         let finished = false;
         while (!finished) {
           await new Promise(resolve => window.setTimeout(resolve, 1200));
@@ -951,11 +1024,13 @@
           processed = job.processed || 0;
           counts = job.counts || counts;
           result.textContent = `批次處理中：${processed} / ${job.total} 張；已確認 ${counts.verified || 0} 張、需核對 ${counts.needs_review || 0} 張。${job.stage ? `\n${job.stage}` : ''}`;
+          progress.textContent = result.textContent;
           finished = ['completed', 'failed'].includes(job.status);
           if (finished) {
             const errors = job.errors || [];
             const details = errors.map(item => `${item.photo_id}: ${item.status}${item.error ? `（${item.error}）` : ''}`).join('\n');
             result.textContent = `${job.status === 'completed' ? '批次完成' : '批次中斷'}：已核對 ${counts.verified || 0} 張、略過 ${counts.skipped || 0} 張、失敗 ${counts.failed || 0} 張、需人工核對 ${counts.needs_review || 0} 張。${job.error ? `\n工作錯誤：${job.error}` : ''}${details ? `\n${details}` : ''}`;
+            progress.textContent = result.textContent;
           }
         }
         batchPhotoIds = [];
@@ -963,6 +1038,7 @@
       } catch (error) {
         batchPhotoIds = [];
         result.textContent = `${error.message || '批次操作失敗'}\n伺服器目前回報已處理 ${processed} 張（確認完成 ${counts.verified || 0} 張）；請重新掃描來源標籤核對尚未完成的照片。`;
+        if (resultSection.hidden === false) progress.textContent = result.textContent;
       } finally {
         button.disabled = batchPhotoIds.length === 0;
         document.getElementById('batch-load-source').disabled = false;
@@ -1451,8 +1527,8 @@
       loadTagJobs();
     }
     const navigationLabels = new Map([
-      ['#photo-sources', '照片來源'],
-      ['#tag-job-workspace', 'AI 標記工作'],
+      ['#photo-sources', '照片庫'],
+      ['#tag-job-workspace', '建立工作'],
       ['#work-results', '工作結果'],
       ['#settings', '設定']
     ]);
