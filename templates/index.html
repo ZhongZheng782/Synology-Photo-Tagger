@@ -105,7 +105,8 @@
           <button class="secondary-button" id="load-job-tags" type="button">載入標籤</button>
           <label>候選照片上限<select id="tag-job-limit"><option>50</option><option selected>100</option><option>200</option><option>300</option></select></label>
           <label>執行方式<select id="tag-job-mode"><option value="write" selected>分析後自動寫入</option><option value="dry_run">Dry run（只預覽，不寫入）</option></select></label>
-          <label class="tag-job-checkbox"><input id="tag-job-skip-processed" type="checkbox" checked>略過 Photo Tagger 曾成功寫入的照片</label>
+          <label class="tag-job-checkbox"><input id="tag-job-skip-processed" type="checkbox" checked>略過已有 Photo Tagger AI 描述或標籤的照片</label>
+          <small class="tag-job-skip-help">只略過成功寫入 AI 描述或 AI 標籤的照片；單純批次更名標籤不計入。略過的照片不會送交 AI 分析，也不會再寫入描述或標籤。</small>
           <button class="primary-button" id="create-tag-job" type="button">預覽候選並建立快照</button>
         </div>
         <div class="tag-job-notice" id="tag-job-notice" hidden role="status" aria-live="polite"></div>
@@ -1005,7 +1006,7 @@
       if (criteria.date_from || criteria.date_to) filters.push(`${criteria.date_from || '最早'} 至 ${criteria.date_to || '最新'}`);
       const tags = criteria.tags || (criteria.tag ? [criteria.tag] : []);
       if (tags.length) filters.push(tags[0] === '__untagged__' ? '未加標籤' : `標籤：${tags.join('、')}`);
-      if (criteria.skip_processed) filters.push('略過已處理照片');
+      if (criteria.skip_processed) filters.push('略過已有 AI 輸出的照片');
       return filters.join(' · ') || '未指定篩選';
     }
 
@@ -1191,7 +1192,7 @@
       document.getElementById('tag-job-title').textContent = `AI 標記工作 · ${tagJobCriteriaLabel(job.criteria)} · ${job.id.slice(0, 8)}`;
       const report = document.getElementById('tag-job-report');
       const counts = job.counts;
-      report.textContent = `狀態：${tagJobStatusText(job.status)}　候選 ${counts.candidates}　已排除曾成功寫入 ${job.skipped_processed_count || 0}　已分析 ${counts.analyzed}　已略過 ${counts.skipped}　分析失敗 ${counts.failed}　需核對 ${counts.needs_review}　已寫入 ${counts.written}　Dry run ${counts.dry_run}`;
+      report.textContent = `狀態：${tagJobStatusText(job.status)}　候選 ${counts.candidates}　候選排除已有 AI 輸出 ${job.skipped_processed_count || 0} 張　已分析 ${counts.analyzed}　已略過 ${counts.skipped}　分析失敗 ${counts.failed}　需核對 ${counts.needs_review}　已寫入 ${counts.written}　Dry run ${counts.dry_run}`;
       if (!job.snapshot_complete) {
         const limitNote = document.createElement('p');
         limitNote.className = 'tag-job-warning';

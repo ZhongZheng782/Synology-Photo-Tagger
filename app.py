@@ -38,7 +38,7 @@ API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 NAS_SESSION_TTL_SECONDS = 12 * 60 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.4.7")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.4.8")
 TAGGER_DB_PATH = os.environ.get(
     "TAGGER_DB_PATH", os.path.join(os.path.dirname(__file__), "data", "photo-tagger.sqlite3")
 )
@@ -1323,11 +1323,10 @@ def record_photo_tagger_processed(owner_key: str, space: str, photo_id: int) -> 
 
 
 def photo_tagger_processed_ids(db: sqlite3.Connection, owner_key: str, space: str) -> set[int]:
-    """Return photos with a verified Photo Tagger write, including writes from older job records."""
+    """Return photos with verified Photo Tagger AI output, including older AI job records."""
     rows = db.execute(
-        "SELECT photo_id FROM photo_tagger_processed_photos WHERE owner_key=? AND space=? "
-        "UNION SELECT photo_id FROM photo_tagger_tag_ledger WHERE owner_key=? AND space=?",
-        (owner_key, space, owner_key, space),
+        "SELECT photo_id FROM photo_tagger_processed_photos WHERE owner_key=? AND space=?",
+        (owner_key, space),
     ).fetchall()
     processed = {int(row["photo_id"]) for row in rows}
     rows = db.execute(
