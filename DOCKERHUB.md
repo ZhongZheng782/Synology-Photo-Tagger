@@ -1,4 +1,4 @@
-# Synology Photo Tagger v0.4.6
+# Synology Photo Tagger v0.4.7
 
 A Python web app for browsing Synology Photos, generating photo descriptions and tags, and applying verified updates through the Synology Photos API.
 
@@ -18,6 +18,7 @@ A Python web app for browsing Synology Photos, generating photo descriptions and
 - Creates a fixed candidate snapshot from personal/shared space, Japan location, date range, and existing-tag filters (maximum 300 candidates and 40 source pages).
 - Analyzes candidates one by one for a concise visual description and relevant tags, using the selected Photos space's existing tag vocabulary where appropriate.
 - Automatically writes valid results and verifies each description and tag through the Photos API; invalid or empty analysis results are skipped.
+- Skips photos successfully processed by Photo Tagger in previous AI tagging jobs by default, with an option to include them; reports the excluded count. Detection is scoped to the signed-in account and selected Photos space.
 - Offers a Dry run mode that analyzes the same candidates and reports intended changes without calling Photos API write operations.
 - Preserves existing photo descriptions: AI descriptions are written only when the current description is empty; existing descriptions are left unchanged while tag updates can proceed.
 - Shows per-photo progress, verified writes, skipped items, failures, and uncertain writes; failed analysis can be retried, while uncertain writes require checking Photos before retrying.
@@ -28,7 +29,7 @@ A Python web app for browsing Synology Photos, generating photo descriptions and
 - Distinguishes identity credentials (`證件`) from general documents (`文件`) in AI tag suggestions.
 - Replaces one existing tag with another across all photos carrying the source tag; the affected count is shown before confirmation and writes are processed in chunks of up to 25 with readback verification.
 
-v0.4.6 replaces the shopping-only batch workflow and manual review gate with general photo descriptions and tags, automatic verified writes, and Dry run. It also changes single-photo analysis to write valid AI suggestions automatically. Existing descriptions are preserved and not replaced; AI descriptions are added only when a photo has no description. Photos API writes may update original-file metadata. The application stores job records in SQLite on the persistent `tagger-data` volume, marks interrupted analysis as failed and interrupted writes as uncertain on restart, and never blindly retries an uncertain write. It does not store original photos or OCR text in job records. Browser login sessions can remain valid for up to 12 idle hours; the signing key persists on `tagger-data`, but NAS passwords and OTP codes are never stored. Restarting the container clears the in-memory NAS API session and may require a new login. The AI uses `證件` only for formal credentials meant to establish a holder’s identity; reports, forms, receipts, and test results are `文件` or a more specific content tag even when they contain a name or number. Batch tag replacement remains available in chunks of up to 25, with destination and source tag readback verification. Synology Photos API behavior can vary by DSM and Photos version.
+v0.4.7 adds an opt-out candidate filter that skips photos with a verified prior Photo Tagger write, scoped to the signed-in account and personal/shared space. It also makes analyzed and written counts easier to scan in the job list and removes the misleading development label from the version display. It retains v0.4.6's general photo descriptions and tags, automatic verified writes, and Dry run. Existing descriptions are preserved and not replaced; AI descriptions are added only when a photo has no description. Photos API writes may update original-file metadata. The application stores job records in SQLite on the persistent `tagger-data` volume, marks interrupted analysis as failed and interrupted writes as uncertain on restart, and never blindly retries an uncertain write. It does not store original photos or OCR text in job records. Browser login sessions can remain valid for up to 12 idle hours; the signing key persists on `tagger-data`, but NAS passwords and OTP codes are never stored. Restarting the container clears the in-memory NAS API session and may require a new login. The AI uses `證件` only for formal credentials meant to establish a holder’s identity; reports, forms, receipts, and test results are `文件` or a more specific content tag even when they contain a name or number. Batch tag replacement remains available in chunks of up to 25, with destination and source tag readback verification. Synology Photos API behavior can vary by DSM and Photos version.
 
 ## Quick start
 
@@ -40,12 +41,12 @@ docker compose up -d
 
 Open `http://localhost:5056/`. Set `SYNOLOGY_URL` to the DSM address reachable from the container. Sign in through the web UI with a Synology account that can access Photos.
 
-The provided Compose file uses the versioned `v0.4.6` image tag. Docker Hub retains only tags in the `vX.Y.Z` format; the publishing workflow removes floating (`latest`), commit (`sha-*`), and non-three-part version tags. Set `MLX_SERVER_URL`, `MLX_SERVER_API_KEY`, and a dedicated Tailscale `TAILSCALE_AUTHKEY` in `.env` to enable analysis. `MLX_OCR_ENGINE` selects `baidu` (default) or `glm` for document OCR. Tailscale node state and AI job records plus the session signing key persist in Docker named volumes.
+The provided Compose file uses the versioned `v0.4.7` image tag. Docker Hub retains only tags in the `vX.Y.Z` format; the publishing workflow removes floating (`latest`), commit (`sha-*`), and non-three-part version tags. Set `MLX_SERVER_URL`, `MLX_SERVER_API_KEY`, and a dedicated Tailscale `TAILSCALE_AUTHKEY` in `.env` to enable analysis. `MLX_OCR_ENGINE` selects `baidu` (default) or `glm` for document OCR. Tailscale node state and AI job records plus the session signing key persist in Docker named volumes.
 
 ## Image
 
 ```sh
-docker pull wenchiehlee1020/synology-photo-tagger:v0.4.6
+docker pull wenchiehlee1020/synology-photo-tagger:v0.4.7
 ```
 
 Source: [GitHub](https://github.com/ZhongZheng782/Synology-Photo-Tagger)

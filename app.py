@@ -38,7 +38,7 @@ API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 NAS_SESSION_TTL_SECONDS = 12 * 60 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.4.6")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.4.7")
 TAGGER_DB_PATH = os.environ.get(
     "TAGGER_DB_PATH", os.path.join(os.path.dirname(__file__), "data", "photo-tagger.sqlite3")
 )
@@ -138,6 +138,7 @@ def initialize_tag_job_db() -> None:
                 snapshot_complete INTEGER NOT NULL DEFAULT 0,
                 candidate_count INTEGER NOT NULL DEFAULT 0,
                 scanned_count INTEGER NOT NULL DEFAULT 0,
+                skipped_processed_count INTEGER NOT NULL DEFAULT 0,
                 error TEXT,
                 created_at REAL NOT NULL,
                 updated_at REAL NOT NULL
@@ -169,8 +170,18 @@ def initialize_tag_job_db() -> None:
                 created_at REAL NOT NULL,
                 PRIMARY KEY(owner_key, space, photo_id, tag_name)
             );
+            CREATE TABLE IF NOT EXISTS photo_tagger_processed_photos (
+                owner_key TEXT NOT NULL,
+                space TEXT NOT NULL,
+                photo_id INTEGER NOT NULL,
+                processed_at REAL NOT NULL,
+                PRIMARY KEY(owner_key, space, photo_id)
+            );
             """
         )
+        job_columns = {row["name"] for row in db.execute("PRAGMA table_info(tag_jobs)").fetchall()}
+        if "skipped_processed_count" not in job_columns:
+            db.execute("ALTER TABLE tag_jobs ADD COLUMN skipped_processed_count INTEGER NOT NULL DEFAULT 0")
         item_columns = {row["name"] for row in db.execute("PRAGMA table_info(tag_job_items)").fetchall()}
         if "reviewed_tag" not in item_columns:
             db.execute("ALTER TABLE tag_job_items ADD COLUMN reviewed_tag TEXT")
@@ -1302,6 +1313,38 @@ def record_photo_tagger_tags(owner_key: str, space: str, photo_id: int, tag_name
         )
 
 
+def record_photo_tagger_processed(owner_key: str, space: str, photo_id: int) -> None:
+    with tag_job_db() as db:
+        db.execute(
+            "INSERT INTO photo_tagger_processed_photos(owner_key, space, photo_id, processed_at) VALUES(?,?,?,?) "
+            "ON CONFLICT(owner_key, space, photo_id) DO UPDATE SET processed_at=excluded.processed_at",
+            (owner_key, space, photo_id, time.time()),
+        )
+
+
+def photo_tagger_processed_ids(db: sqlite3.Connection, owner_key: str, space: str) -> set[int]:
+    """Return photos with a verified Photo Tagger write, including writes from older job records."""
+    rows = db.execute(
+        "SELECT photo_id FROM photo_tagger_processed_photos WHERE owner_key=? AND space=? "
+        "UNION SELECT photo_id FROM photo_tagger_tag_ledger WHERE owner_key=? AND space=?",
+        (owner_key, space, owner_key, space),
+    ).fetchall()
+    processed = {int(row["photo_id"]) for row in rows}
+    rows = db.execute(
+        "SELECT i.photo_id, i.write_json FROM tag_job_items i JOIN tag_jobs j ON j.id=i.job_id "
+        "WHERE j.owner_key=? AND j.space=? AND i.status='written' "
+        "AND (i.undo_status IS NULL OR i.undo_status!='undone')",
+        (owner_key, space),
+    ).fetchall()
+    for row in rows:
+        try:
+            if json.loads(row["write_json"] or "{}").get("ok") is True:
+                processed.add(int(row["photo_id"]))
+        except (TypeError, ValueError, AttributeError):
+            continue
+    return processed
+
+
 def annotate_photo_tagger_tags(
     nas: NasSession, photos: list[dict], space: str, owner_key: str | None
 ) -> list[dict]:
@@ -1425,6 +1468,7 @@ def tag_job_summary(db: sqlite3.Connection, job: sqlite3.Row) -> dict:
         "criteria": json.loads(job["criteria_json"]), "status": job["status"],
         "snapshot_complete": bool(job["snapshot_complete"]),
         "scanned_count": job["scanned_count"], "error": job["error"],
+        "skipped_processed_count": job["skipped_processed_count"],
         "created_at": job["created_at"], "updated_at": job["updated_at"],
         "counts": counts,
     }
@@ -1515,8 +1559,13 @@ def prepare_tag_job(job_id: str, owner_key: str, nas_token: str, space: str, cri
             api_name = "SYNO.Foto.Browse.Item" if space == "personal" else "SYNO.FotoTeam.Browse.Item"
             url, version = api_endpoint(nas, api_name)
             index = photo_library_index(nas_token, space)
+            with tag_job_db() as db:
+                processed_ids = photo_tagger_processed_ids(db, owner_key, space) if criteria.get("skip_processed") else set()
+            def eligible_matches():
+                all_matches = matching_job_photos_by_criteria(index, criteria)
+                return all_matches, [photo for photo in all_matches if photo.get("id") not in processed_ids]
             for _ in range(TAG_JOB_MAX_SCAN_PAGES):
-                matches = matching_job_photos_by_criteria(index, criteria)
+                all_matches, matches = eligible_matches()
                 if index.complete or len(matches) > max_candidates:
                     break
                 scan_photo_library_page(nas, api_name, url, version, index)
@@ -1525,7 +1574,8 @@ def prepare_tag_job(job_id: str, owner_key: str, nas_token: str, space: str, cri
                         "UPDATE tag_jobs SET scanned_count=?, updated_at=? WHERE id=? AND owner_key=?",
                         (index.source_offset, time.time(), job_id, owner_key),
                     )
-            matches = matching_job_photos_by_criteria(index, criteria)
+            all_matches, matches = eligible_matches()
+            skipped_processed_count = sum(photo.get("id") in processed_ids for photo in all_matches)
             selected = matches[:max_candidates]
             truncated = len(matches) > max_candidates or not index.complete
             if len(matches) > max_candidates:
@@ -1555,9 +1605,9 @@ def prepare_tag_job(job_id: str, owner_key: str, nas_token: str, space: str, cri
                     ],
                 )
                 db.execute(
-                    "UPDATE tag_jobs SET candidate_count=?, snapshot_complete=?, scanned_count=?, status=?, error=?, updated_at=? "
+                    "UPDATE tag_jobs SET candidate_count=?, snapshot_complete=?, scanned_count=?, skipped_processed_count=?, status=?, error=?, updated_at=? "
                     "WHERE id=? AND owner_key=?",
-                    (len(selected), int(not truncated), index.source_offset,
+                    (len(selected), int(not truncated), index.source_offset, skipped_processed_count,
                      "ready" if selected else "empty",
                      snapshot_warning,
                      time.time(), job_id, owner_key),
@@ -1602,6 +1652,9 @@ def create_tag_job():
     date_to_raw = body.get("date_to", "")
     task = body.get("task", "photo")
     dry_run = body.get("dry_run") is True
+    skip_processed = body.get("skip_processed", True)
+    if not isinstance(skip_processed, bool):
+        return jsonify({"ok": False, "error": "略過已處理照片選項格式無效。"}), 400
     try:
         max_candidates = int(body.get("max_candidates", 100))
     except (TypeError, ValueError):
@@ -1648,6 +1701,7 @@ def create_tag_job():
             "date_to": date_to,
             "max_candidates": max_candidates,
             "dry_run": dry_run,
+            "skip_processed": skip_processed,
         }
         db.execute(
             "INSERT INTO tag_jobs(id, owner_key, space, task, criteria_json, status, created_at, updated_at) "
@@ -1803,6 +1857,11 @@ def run_tag_job_analysis(job_id: str, owner_key: str, nas_token: str) -> None:
                     "UPDATE tag_job_items SET status=?, write_json=?, error=?, updated_at=? WHERE job_id=? AND photo_id=?",
                     (state, json.dumps(safe_write, ensure_ascii=False), safe_write.get("error"), time.time(), job_id, photo_id),
                 )
+            if state == "written":
+                try:
+                    record_photo_tagger_processed(owner_key, space, photo_id)
+                except sqlite3.Error:
+                    app.logger.exception("Could not record Photo Tagger processing provenance for item %s", photo_id)
         with tag_job_db() as db:
             counts = db.execute(
                 "SELECT SUM(status='queued') AS queued, SUM(status='running') AS running, SUM(status='writing') AS writing, SUM(status='failed') AS failed, SUM(status='write_uncertain') AS uncertain "
@@ -1973,6 +2032,11 @@ def run_tag_job_write(job_id: str, owner_key: str, nas_token: str) -> None:
                     "UPDATE tag_job_items SET status=?, write_json=?, error=?, updated_at=? WHERE job_id=? AND photo_id=?",
                     (state, json.dumps(safe_write, ensure_ascii=False), safe_write["error"], time.time(), job_id, photo_id),
                 )
+            if state == "written":
+                try:
+                    record_photo_tagger_processed(owner_key, space, photo_id)
+                except sqlite3.Error:
+                    app.logger.exception("Could not record Photo Tagger processing provenance for item %s", photo_id)
         with tag_job_db() as db:
             counts = db.execute("SELECT SUM(status='writing') AS writing, SUM(status='write_uncertain') AS uncertain, SUM(status='failed') AS failed FROM tag_job_items WHERE job_id=?", (job_id,)).fetchone()
             status = "written" if not (counts["writing"] or counts["uncertain"] or counts["failed"]) else "needs_attention"
@@ -2976,6 +3040,11 @@ def write_photo_analysis(photo_id: int):
         except sqlite3.Error:
             # A provenance index failure must not convert a verified Photos API write into an apparent failure.
             app.logger.exception("Could not record Photo Tagger tag provenance for item %s", photo_id)
+    if success and owner_key:
+        try:
+            record_photo_tagger_processed(owner_key, space, photo_id)
+        except sqlite3.Error:
+            app.logger.exception("Could not record Photo Tagger processing provenance for item %s", photo_id)
     return jsonify({
         "ok": success,
         "photo_id": photo_id,

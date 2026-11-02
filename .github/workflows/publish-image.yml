@@ -32,7 +32,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            wenchiehlee1020/synology-photo-tagger:v0.4.6
+            wenchiehlee1020/synology-photo-tagger:v0.4.7
 
       - name: Remove non-version image tags
         env:
@@ -95,5 +95,5 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
           repository: wenchiehlee1020/synology-photo-tagger
-          short-description: Synology Photos AI descriptions and tags with automatic verified writes and dry-run mode (v0.4.6).
+          short-description: Synology Photos AI descriptions and tags with skip-processed jobs and verified writes (v0.4.7).
           readme-filepath: ./DOCKERHUB.md

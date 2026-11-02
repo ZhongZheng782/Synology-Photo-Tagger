@@ -28,7 +28,7 @@
 
       <div class="sidebar-bottom">
         <div class="privacy-note"><span class="privacy-icon">◈</span><div><strong>分析留在你的私有網路</strong><small>原圖僅送到 Mac-mini MLX</small></div></div>
-        <div class="version-label">{{ app_version }} · 開發版 <span class="live-dot"></span></div>
+        <div class="version-label">{{ app_version }} <span class="live-dot"></span></div>
       </div>
     </aside>
 
@@ -105,6 +105,7 @@
           <button class="secondary-button" id="load-job-tags" type="button">載入標籤</button>
           <label>候選照片上限<select id="tag-job-limit"><option>50</option><option selected>100</option><option>200</option><option>300</option></select></label>
           <label>執行方式<select id="tag-job-mode"><option value="write" selected>分析後自動寫入</option><option value="dry_run">Dry run（只預覽，不寫入）</option></select></label>
+          <label class="tag-job-checkbox"><input id="tag-job-skip-processed" type="checkbox" checked>略過 Photo Tagger 曾成功寫入的照片</label>
           <button class="primary-button" id="create-tag-job" type="button">預覽候選並建立快照</button>
         </div>
         <div class="tag-job-notice" id="tag-job-notice" hidden role="status" aria-live="polite"></div>
@@ -143,7 +144,7 @@
         </section>
       </section>
 
-      <footer class="footer"><span>Synology Photo Tagger <span class="footer-sep">·</span> {{ app_version }} · 開發版</span><span>照片與標籤由你掌控 <span class="footer-heart">✦</span></span></footer>
+      <footer class="footer"><span>Synology Photo Tagger <span class="footer-sep">·</span> {{ app_version }}</span><span>照片與標籤由你掌控 <span class="footer-heart">✦</span></span></footer>
     </main>
   </div>
 
@@ -1004,6 +1005,7 @@
       if (criteria.date_from || criteria.date_to) filters.push(`${criteria.date_from || '最早'} 至 ${criteria.date_to || '最新'}`);
       const tags = criteria.tags || (criteria.tag ? [criteria.tag] : []);
       if (tags.length) filters.push(tags[0] === '__untagged__' ? '未加標籤' : `標籤：${tags.join('、')}`);
+      if (criteria.skip_processed) filters.push('略過已處理照片');
       return filters.join(' · ') || '未指定篩選';
     }
 
@@ -1023,8 +1025,19 @@
           const title = document.createElement('strong');
           title.textContent = `AI 標記 · ${tagJobCriteriaLabel(job.criteria)} · ${job.counts.candidates} 張`;
           const detail = document.createElement('small');
-          detail.textContent = `${job.space === 'personal' ? '個人空間' : '共享空間'} · ${tagJobStatusText(job.status)} · 分析 ${job.counts.analyzed} · 已寫入 ${job.counts.written} · Dry run ${job.counts.dry_run}`;
-          button.append(title, detail);
+          detail.className = 'tag-job-row-meta';
+          detail.textContent = `${job.space === 'personal' ? '個人空間' : '共享空間'} · ${tagJobStatusText(job.status)} · Dry run ${job.counts.dry_run}`;
+          const metrics = document.createElement('div');
+          metrics.className = 'tag-job-row-metrics';
+          for (const [label, value] of [['分析', job.counts.analyzed], ['已寫入', job.counts.written]]) {
+            const metric = document.createElement('span');
+            metric.append(document.createTextNode(`${label} `));
+            const number = document.createElement('strong');
+            number.textContent = value;
+            metric.append(number);
+            metrics.append(metric);
+          }
+          button.append(title, detail, metrics);
           button.addEventListener('click', () => openTagJob(job.id));
           list.append(button);
         }
@@ -1178,7 +1191,7 @@
       document.getElementById('tag-job-title').textContent = `AI 標記工作 · ${tagJobCriteriaLabel(job.criteria)} · ${job.id.slice(0, 8)}`;
       const report = document.getElementById('tag-job-report');
       const counts = job.counts;
-      report.textContent = `狀態：${tagJobStatusText(job.status)}　候選 ${counts.candidates}　已分析 ${counts.analyzed}　已略過 ${counts.skipped}　分析失敗 ${counts.failed}　需核對 ${counts.needs_review}　已寫入 ${counts.written}　Dry run ${counts.dry_run}`;
+      report.textContent = `狀態：${tagJobStatusText(job.status)}　候選 ${counts.candidates}　已排除曾成功寫入 ${job.skipped_processed_count || 0}　已分析 ${counts.analyzed}　已略過 ${counts.skipped}　分析失敗 ${counts.failed}　需核對 ${counts.needs_review}　已寫入 ${counts.written}　Dry run ${counts.dry_run}`;
       if (!job.snapshot_complete) {
         const limitNote = document.createElement('p');
         limitNote.className = 'tag-job-warning';
@@ -1293,6 +1306,7 @@
             tags: [...document.getElementById('tag-job-tags').selectedOptions].map(option => option.value),
             task: 'photo',
             dry_run: document.getElementById('tag-job-mode').value === 'dry_run',
+            skip_processed: document.getElementById('tag-job-skip-processed').checked,
             max_candidates: Number(document.getElementById('tag-job-limit').value),
           }),
         });
