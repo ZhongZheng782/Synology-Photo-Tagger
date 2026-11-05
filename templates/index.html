@@ -41,7 +41,7 @@
       <section class="content-grid auth-grid" id="auth-panel">
         <article class="panel connection-panel">
           <div class="panel-heading"><div><h2>登入並瀏覽照片庫</h2></div><span class="heading-icon">⌕</span></div>
-          <p class="panel-copy">登入後可讀取個人空間或共享空間的照片項目、拍攝時間、地點與既有標籤。登入狀態會在此瀏覽器保留，閒置 12 小時後失效；NAS 密碼與雙重驗證碼不會被保存。</p>
+          <p class="panel-copy">登入後可讀取個人空間或共享空間的照片項目、拍攝時間、地點與既有標籤。一般登入不保存 NAS 密碼或 OTP。若啟用定期工作登入，NAS 密碼會用主機外部金鑰加密保存；OTP 不保存。</p>
           <form id="login-form" {% if logged_in %}hidden{% endif %}>
             <label class="field-label" for="nas-username">NAS 帳號</label>
             <input class="text-field" id="nas-username" name="username" autocomplete="username" required>
@@ -49,6 +49,7 @@
             <input class="text-field" id="nas-password" name="password" type="password" autocomplete="current-password" required>
             <label class="field-label" for="nas-otp">雙重驗證碼 <span>如帳號有啟用</span></label>
             <input class="text-field otp-field" id="nas-otp" name="otp_code" inputmode="numeric" autocomplete="one-time-code" maxlength="8">
+            <label class="check-row trusted-device-option"><input id="register-trusted-device" type="checkbox"><span>註冊 Synology 受信任裝置（加密保存 NAS 密碼；不保存 OTP）</span></label>
             <button class="primary-button auth-submit" type="submit" {% if not base_url %}disabled{% endif %}>安全登入 NAS <span class="button-arrow">→</span></button>
           </form>
           <div class="logged-in-row" id="logged-in-row" {% if not logged_in %}hidden{% endif %}>
@@ -98,7 +99,7 @@
           <label>結束日期<input id="tag-job-date-to" type="date"></label>
           <label>既有標籤（符合任一項）<select id="tag-job-tags" multiple disabled><option>請先載入標籤</option></select></label>
           <button class="secondary-button" id="load-job-tags" type="button">載入標籤</button>
-          <label>候選照片上限<select id="tag-job-limit"><option>50</option><option selected>100</option><option>200</option><option>300</option></select></label>
+          <label>候選照片上限<select id="tag-job-limit"><option>50</option><option selected>100</option><option>200</option><option>300</option><option>500</option><option>800</option><option>1000</option></select></label>
           <label>執行方式<select id="tag-job-mode"><option value="write" selected>分析後自動寫入</option><option value="dry_run">Dry run（只預覽，不寫入）</option></select></label>
           <label class="tag-job-checkbox"><input id="tag-job-skip-processed" type="checkbox" checked>略過已有 Photo Tagger AI 描述或標籤的照片</label>
           <small class="tag-job-skip-help">只略過成功寫入 AI 描述或 AI 標籤的照片；單純批次更名標籤不計入。略過的照片不會送交 AI 分析，也不會再寫入描述或標籤。</small>
@@ -145,6 +146,15 @@
           <article class="summary-card"><div class="summary-top"><span class="summary-icon blue">⌁</span><span class="status-pill {% if base_url %}configured{% else %}waiting{% endif %}"><i></i>{% if base_url %}已設定{% else %}待設定{% endif %}</span></div><div class="summary-title">Synology Photos API</div><div class="summary-detail">{% if base_url %}{{ base_url }}{% else %}尚未設定 NAS 網址{% endif %}</div></article>
           <article class="summary-card"><div class="summary-top"><span class="summary-icon green">▧</span><span class="status-pill {% if library_mounted %}configured{% else %}waiting{% endif %}"><i></i>{% if library_mounted %}已掛載{% else %}未掛載{% endif %}</span></div><div class="summary-title">照片唯讀掛載</div><div class="summary-detail">{% if library_mounted %}容器可讀取掛載路徑{% else %}容器中找不到 /Photos{% endif %}</div></article>
         </div>
+        <section class="module-panel schedule-panel" aria-label="定期 AI 標記工作">
+          <div class="module-heading"><div><p class="eyebrow">SCHEDULED WORK</p><h3>定期 AI 標記</h3></div><span class="module-count">Asia/Taipei</span></div>
+          <p class="module-intro">建立每日工作，執行時只掃描當天拍攝的照片，並沿用「建立工作」目前設定。若要讓工作在登出或容器重啟後執行，登入時請註冊此裝置。NAS 密碼會使用外部唯讀金鑰加密後保存在資料 volume；TOTP 不會保存。金鑰未設定時，定期工作無法啟用。</p>
+          <div class="trusted-device-status" id="trusted-device-status" role="status">登入後載入受信任裝置狀態。</div>
+          <button class="secondary-button" id="forget-trusted-device" type="button" hidden>移除此服務的排程登入資料</button>
+          <div class="schedule-create-row"><label>每日執行時間<input id="daily-schedule-time" type="time" value="02:00"></label><button class="primary-button" id="create-daily-schedule" type="button" {% if not logged_in %}disabled{% endif %}>使用目前 AI 標記設定新增每日工作</button></div>
+          <div class="schedule-list" id="daily-schedule-list"><p class="photo-empty">登入後載入定期工作。</p></div>
+          <div class="result-box" id="schedule-result" hidden aria-live="polite"></div>
+        </section>
         <div class="connection-details settings-connection-details">
           <div class="detail-row"><span>DSM 位址</span><strong class="mono">{% if base_url %}{{ base_url }}{% else %}尚未設定{% endif %}</strong></div>
           <div class="detail-row"><span>Photos API SDK</span><strong><span class="sdk-mark">Py</span> synology-api <span class="version-chip">{{ sdk_version }}</span></strong></div>
@@ -1067,6 +1077,125 @@
       return payload;
     }
 
+    const scheduleStatusLabels = {
+      scheduled: '已排程', paused: '已暫停', waiting_login: '等待重新登入', preparing: '建立今日候選快照',
+      analyzing: 'AI 標記處理中', written: '已完成並核對寫入', dry_run: 'Dry run 已完成',
+      empty: '今日沒有符合條件的照片', failed: '執行失敗', needs_attention: '需要核對'
+    };
+    async function loadTagJobSchedules() {
+      const list = document.getElementById('daily-schedule-list');
+      if (!list) return;
+      try {
+        const payload = await tagJobRequest('/api/tag-job-schedules');
+        const status = document.getElementById('trusted-device-status');
+        const forgetButton = document.getElementById('forget-trusted-device');
+        const scheduleButton = document.getElementById('create-daily-schedule');
+        if (!payload.schedule_key_ready) {
+          status.textContent = '尚未設定排程加密金鑰。請管理者在 Docker Compose 設定 NAS_SCHEDULE_KEY_SOURCE，重新部署後再註冊裝置。';
+          forgetButton.hidden = true;
+          scheduleButton.disabled = true;
+        } else if (payload.trusted_device_account_mismatch) {
+          status.textContent = '此服務已註冊另一個 NAS 帳號的排程裝置。請改用該帳號登入管理，或先移除原裝置資料。';
+          forgetButton.hidden = true;
+          scheduleButton.disabled = true;
+        } else if (payload.trusted_device_registered) {
+          status.textContent = '受信任裝置已註冊。排程登入資料已加密保存；TOTP 未保存。';
+          forgetButton.hidden = false;
+          scheduleButton.disabled = false;
+        } else {
+          status.textContent = '尚未註冊排程登入裝置。請登出後重新登入，並勾選「註冊此裝置供定期工作登入」。';
+          forgetButton.hidden = true;
+          scheduleButton.disabled = true;
+        }
+        list.replaceChildren();
+        if (!payload.schedules?.length) {
+          list.append(Object.assign(document.createElement('p'), {className: 'photo-empty', textContent: '目前沒有定期工作。'}));
+          return;
+        }
+        for (const schedule of payload.schedules) {
+          const row = document.createElement('div');
+          row.className = 'schedule-row';
+          const info = document.createElement('div');
+          const title = document.createElement('strong');
+          title.textContent = `每日 ${schedule.daily_time} · ${schedule.space === 'shared' ? '共享空間' : '個人空間'} · ${schedule.enabled ? (scheduleStatusLabels[schedule.last_status] || schedule.last_status) : '已暫停'}`;
+          const criteria = schedule.criteria || {};
+          const details = document.createElement('small');
+          const filters = [criteria.country === 'japan' ? '日本' : '不限地點', `上限 ${criteria.max_candidates} 張`, criteria.dry_run ? 'Dry run' : '分析後自動寫入', criteria.skip_processed ? '略過已處理' : '包含已處理'];
+          if (criteria.tags?.length) filters.push(`標籤：${criteria.tags.join('、')}`);
+          details.textContent = `${filters.join(' · ')} · 下次 ${schedule.next_run}${schedule.last_error ? ` · ${schedule.last_error}` : ''}`;
+          info.append(title, details);
+          const actions = document.createElement('div');
+          actions.className = 'schedule-actions';
+          const toggle = document.createElement('button');
+          toggle.type = 'button';
+          toggle.className = 'secondary-button';
+          toggle.textContent = schedule.enabled ? '暫停' : '啟用';
+          toggle.addEventListener('click', async () => {
+            try {
+              await tagJobRequest(`/api/tag-job-schedules/${encodeURIComponent(schedule.id)}`, {
+                method: 'PATCH', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({enabled: !schedule.enabled})
+              });
+              await loadTagJobSchedules();
+            } catch (error) { showScheduleResult(error.message, true); }
+          });
+          const remove = document.createElement('button');
+          remove.type = 'button';
+          remove.className = 'secondary-button';
+          remove.textContent = '刪除';
+          remove.addEventListener('click', async () => {
+            try {
+              await tagJobRequest(`/api/tag-job-schedules/${encodeURIComponent(schedule.id)}`, {method: 'DELETE'});
+              await loadTagJobSchedules();
+            } catch (error) { showScheduleResult(error.message, true); }
+          });
+          actions.append(toggle, remove);
+          row.append(info, actions);
+          list.append(row);
+        }
+      } catch (error) {
+        list.replaceChildren(Object.assign(document.createElement('p'), {className: 'photo-empty error-text', textContent: error.message || '無法載入定期工作。'}));
+      }
+    }
+    function showScheduleResult(message, error = false) {
+      const result = document.getElementById('schedule-result');
+      result.hidden = !message;
+      result.textContent = message || '';
+      result.classList.toggle('error-text', error);
+    }
+    document.getElementById('create-daily-schedule')?.addEventListener('click', async event => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      showScheduleResult('正在建立每日工作…');
+      try {
+        const payload = await tagJobRequest('/api/tag-job-schedules', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            daily_time: document.getElementById('daily-schedule-time').value,
+            space: document.getElementById('tag-job-space').value,
+            country: document.getElementById('tag-job-country').value,
+            tags: [...document.getElementById('tag-job-tags').selectedOptions].map(option => option.value),
+            max_candidates: Number(document.getElementById('tag-job-limit').value),
+            dry_run: document.getElementById('tag-job-mode').value === 'dry_run',
+            skip_processed: document.getElementById('tag-job-skip-processed').checked
+          })
+        });
+        showScheduleResult(`已建立每日工作。每次執行會用「${payload.schedule_id.slice(0, 8)}」設定掃描當天照片。`);
+        await loadTagJobSchedules();
+      } catch (error) { showScheduleResult(error.message || '無法建立每日工作。', true); }
+      finally { button.disabled = false; }
+    });
+    document.getElementById('forget-trusted-device')?.addEventListener('click', async event => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      try {
+        const result = await tagJobRequest('/api/trusted-device', {method: 'DELETE'});
+        showScheduleResult(result.message);
+        await loadTagJobSchedules();
+      } catch (error) { showScheduleResult(error.message || '無法移除排程登入資料。', true); }
+      finally { button.disabled = false; }
+    });
+
     function tagJobStatusText(status) {
       return ({
         preparing: '正在建立候選快照', ready: '待分析', analyzing: '分析中', dry_run: '預覽完成',
@@ -1451,7 +1580,8 @@
           body: JSON.stringify({
             username: formData.get('username'),
             password: formData.get('password'),
-            otp_code: formData.get('otp_code')
+            otp_code: formData.get('otp_code'),
+            register_trusted_device: document.getElementById('register-trusted-device').checked
           })
         });
         const data = await response.json();
@@ -1466,9 +1596,11 @@
         photoBrowser.hidden = false;
         document.getElementById('tag-job-workspace').hidden = false;
         document.getElementById('work-results').hidden = false;
+        document.getElementById('create-daily-schedule').disabled = false;
         resetPhotoTags();
         await loadPhotos(0);
         await loadTagJobs();
+        await loadTagJobSchedules();
       } catch (error) {
         showAuthResult('無法完成登入，請確認服務與 NAS 連線。', 'error');
       } finally {
@@ -1486,6 +1618,8 @@
       photoBrowser.hidden = true;
       document.getElementById('tag-job-workspace').hidden = true;
       document.getElementById('work-results').hidden = true;
+      document.getElementById('create-daily-schedule').disabled = true;
+      document.getElementById('daily-schedule-list').replaceChildren(Object.assign(document.createElement('p'), {className: 'photo-empty', textContent: '登入後載入定期工作。'}));
       if (tagJobPollTimer) window.clearInterval(tagJobPollTimer);
       tagJobPollTimer = null;
       resetPhotoTags();
@@ -1525,7 +1659,14 @@
     } else {
       document.getElementById('work-results').hidden = false;
       loadTagJobs();
+      loadTagJobSchedules();
     }
+    window.setInterval(() => {
+      if (loginForm.hidden) {
+        loadTagJobs();
+        loadTagJobSchedules();
+      }
+    }, 60000);
     const navigationLabels = new Map([
       ['#photo-sources', '照片庫'],
       ['#tag-job-workspace', '建立工作'],

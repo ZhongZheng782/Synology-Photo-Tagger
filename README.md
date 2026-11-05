@@ -260,11 +260,11 @@
 
 「探索 API 模組」只用於設定與故障診斷，不會執行照片分析或寫入。一般照片工作直接使用服務端取得的 API catalog，不要求使用者先進入設定或手動探索。
 
-本 UX 定義的是目標流程。v0.4.8 已發佈至 Docker Hub 並部署至 NAS。v0.4.9 將側欄明確分成「照片庫、建立工作、工作結果、設定」：照片庫只負責瀏覽與單張操作；批次 AI 標記與批次標籤更名都由建立工作啟動；兩類工作的進度與結果集中在工作結果。
+本 UX 定義的是目標流程。v0.4.8 已發佈至 Docker Hub 並部署至 NAS。v0.4.9 將側欄明確分成「照片庫、建立工作、工作結果、設定」：照片庫只負責瀏覽與單張操作；批次 AI 標記與批次標籤更名都由建立工作啟動；兩類工作的進度與結果集中在工作結果。v0.4.10 擴充候選上限至 1000 張，並加入每日 AI 標記排程與 Synology 受信任裝置登入。
 
 ## 目前頁面盤點與 Production TODO
 
-以下盤點已部署的 v0.4.8 與準備中的 v0.4.9 差異。UX 方向已定稿；Production TODO 列出仍需實作或驗證的工作。
+以下盤點涵蓋已部署的 v0.4.8、v0.4.9 與準備發佈的 v0.4.10 修改及仍需驗證的工作。UX 方向已定稿；Production TODO 列出尚未完成的產品化項目。
 
 | 頁面／區域 | 目前行為 | Production TODO |
 | --- | --- | --- |
@@ -286,7 +286,7 @@
 4. 補齊中斷工作自動讀回調和、權限與錯誤狀態、OCR 隱私處理及 DSM／Photos 相容性驗證；目前已有 SQLite 持久化及安全標示中斷寫入的基礎處理。
 5. 完成 UX Mockup v1.1 的 UX-Deck 視覺系統與橫向照片清單；未支援功能需明確標示，再更新版本說明與部署文件。導覽骨架與 API 探索 Settings 區已開始實作。
 
-v0.4.9 已發佈至 Docker Hub 並部署至 NAS。尚待完成的 Production 驗證項目仍依上表追蹤。
+v0.4.9 已發佈至 Docker Hub 並部署至 NAS。v0.4.10 增加候選數量選項與定期 AI 標記；目標 NAS 驗證及部署完成後，會在此更新狀態。
 
 ## 參考實作
 
@@ -304,7 +304,7 @@ UC-01 至 UC-04 是目標產品需求。下表列出已部署 v0.4.9 的功能�
 | UC-03 健檢範例 | 單張分析會自動寫入有效描述與標籤；既有描述會保留 | 敏感 OCR 欄位排除、隱私流程與目標 NAS 驗證 |
 | UC-04 已標籤照片 | 支援多個既有標籤條件及整批 enrichment | 目標 NAS 驗證標籤詞彙重用、新標籤建立與讀回 |
 
-目前 AI 標記工作建立最多 300 張候選、最多掃描 40 頁的快照；超過上限時會標示不完整。v0.4.8 發佈映像提供一般照片分析、自動寫入／dry run 與讀回核對，並放大工作結果的分析／已寫入數字。新工作只在原描述為空時寫入 AI 描述；已有描述時保留原文並略過描述更新，標籤仍可安全新增及核對。v0.4.8 將略過條件限定為 Photo Tagger AI 描述或標籤成功寫入紀錄，單純標籤更名不會觸發略過。工作資料存在 SQLite；服務啟動時會把分析中項目標示為失敗、寫入中項目標示為需核對，避免不確定狀態自動重試。尚未實作透過 Photos API 自動調和中斷前後狀態。
+已部署的 v0.4.9 映像支援最多 300 張候選及 40 頁掃描。本機待發佈修改將選項擴充至 500、800、1000 張，並將候選上限提高至 1000；達設定上限或掃描頁數上限時會標示快照不完整。v0.4.8 發佈映像提供一般照片分析、自動寫入／dry run 與讀回核對，並放大工作結果的分析／已寫入數字。新工作只在原描述為空時寫入 AI 描述；已有描述時保留原文並略過描述更新，標籤仍可安全新增及核對。v0.4.8 將略過條件限定為 Photo Tagger AI 描述或標籤成功寫入紀錄，單純標籤更名不會觸發略過。工作資料存在 SQLite；服務啟動時會把分析中項目標示為失敗、寫入中項目標示為需核對，避免不確定狀態自動重試。尚未實作透過 Photos API 自動調和中斷前後狀態。
 
 正式上線前仍須完成中斷工作自動調和、格式／空間／API 版本相容矩陣，以及外部 OCR 資料傳輸告知。影片標註、跨全庫無限制掃描與直接寫入 Synology Photos 資料庫不在支援範圍內。
 
@@ -312,7 +312,7 @@ UC-01 至 UC-04 是目標產品需求。下表列出已部署 v0.4.9 的功能�
 
 v0.4.8 已發佈：預設略過有 Photo Tagger AI 描述或 AI 標籤成功寫入紀錄的照片；單純批次更名標籤不計入略過。被略過照片不會進入 AI 分析，也不會寫入描述或其他標籤。
 
-v0.4.9 將照片清單改為「照片庫」，移除登入區的步驟編號，並把 AI 標記與批次更改標籤整合到「建立工作」的工作類型切換器。照片庫篩選只影響目前顯示清單；AI 標記工作仍在建立工作區獨立設定條件。批次更改標籤的進度及完成摘要會同步顯示在「工作結果」。
+v0.4.9 將照片清單改為「照片庫」，移除登入區的步驟編號，並把 AI 標記與批次更改標籤整合到「建立工作」的工作類型切換器。v0.4.10 加入候選上限 500、800、1000 張選項，以及每天依指定時間掃描當日照片的定期 AI 標記；可登出後執行及於容器重啟後復原 NAS 登入。照片庫篩選只影響目前顯示清單；AI 標記工作仍在建立工作區獨立設定條件。批次更改標籤的進度及完成摘要會同步顯示在「工作結果」。
 
 歷史版本 v0.4.7。本版把 AI 標記工作從購物判斷改為一般照片描述與標籤，加入自動寫入、Dry run 及 Photos API 讀回核對；有效結果不需逐張確認。單張 AI 分析也會自動寫入有效結果。若照片已有描述，保留原文並略過描述更新；標籤可新增及核對。Docker Hub 與 NAS Compose 均使用 `v0.4.7`。以下保留歷史功能摘要：v0.4.0 新增 AI 標記工作：依個人或共享空間、日本地點及既有標籤建立固定候選快照；逐張分析購物情境，展示縮圖、判斷理由與信心分數；人工可接受、略過，或選擇目前空間的既有標籤／新增「購物」標籤。只有人工接受後再按「寫入已接受項目」才會透過 Photos API 寫入，並逐張讀回核對。工作可下載 JSON 報告、安全重跑分析失敗項目，或撤銷該工作實際新增的標籤。標籤寫入可能改變照片原檔 metadata；撤銷只移除工作新增的標籤，不會復原檔案位元組或其他 metadata。候選最多 300 張、最多掃描 40 頁；達上限時工作會註明快照不完整。工作資料與報告存在 `/data/photo-tagger.sqlite3`，Compose named volume `tagger-data` 會跨容器重建保留；原圖與 OCR 原文不會存進工作資料庫。v0.4.1 讓瀏覽器登入在閒置 12 小時內持續有效；簽章金鑰自動保存於 `tagger-data` volume，不保存 NAS 密碼或 OTP。容器重啟會清除記憶體中的 NAS API session，屆時仍需重新登入。v0.4.2 的照片候選清單會標出 Photo Tagger 成功新增且目前仍存在的標籤，來源包含單張寫入與標記工作；已撤銷的工作標籤會排除。v0.4.3 的 AI 標籤規則明確區分「證件」與「文件」：「證件」只指用途在辨識或證明持有人身分的正式證件；一般報告、表格、收據或檢驗單，即使含姓名或編號，也歸為「文件」或更具體的內容。v0.4.4 新增批次更改標籤：從目前空間選擇已存在的來源與目標標籤，掃描來源標籤的所有照片並先顯示影響筆數，再一次確認執行；服務以每批最多 25 張分段處理，每張先新增並讀回確認目標標籤，再移除來源標籤並讀回核對。中途結果不確定的項目會標示需人工核對。v0.4.5 將標籤批次更改移到背景工作執行，瀏覽器以短輪詢顯示進度及逐張異常，避免整批 Photos API 請求被閘道逾時；工作狀態存在服務記憶體中，容器重啟後若狀態遺失，重新掃描來源標籤即可核對尚未完成的照片。Docker Hub Repository overview 的同步稿位於 [`DOCKERHUB.md`](DOCKERHUB.md)。
 
@@ -333,6 +333,23 @@ v0.4.9 將照片清單改為「照片庫」，移除登入區的步驟編號，�
 直接使用 HTTP 埠時，登入密碼會在瀏覽器與 Web UI 之間傳送；只應在可信任的 LAN 或 SSH tunnel 中使用。需要跨不可信網路存取時，應先透過 DSM 反向代理或其他 TLS 終端提供 HTTPS，再登入。NAS API 端連線會驗證 TLS 憑證，不支援關閉驗證。
 
 Compose 預設將個人空間 `/volume1/homes/wjlee/Photos` 唯讀掛載至容器的 `/Photos`。AI 分析使用 Photos API，不讀取該掛載路徑。Tailscale 使用 userspace networking 和只綁定容器 loopback 的 HTTP proxy，不需要 `NET_ADMIN`、`NET_RAW` 或 `/dev/net/tun`。`publish-image.yml` 可由 GitHub Actions 手動觸發，將多架構映像發佈至 `wenchiehlee1020/synology-photo-tagger`；需要設定 `DOCKERHUB_USERNAME` 與 `DOCKERHUB_TOKEN` repository secrets。
+
+### v0.4.10 定期工作與受信任裝置
+
+定期 AI 標記需要 DSM 支援的 Synology `SYNO.API.Auth` v6 受信任裝置登入。第一次登入時勾選「註冊此裝置供定期工作登入」，並輸入當次密碼與 OTP；Photo Tagger 會註冊 `Synology-Photo-Tagger` 裝置識別碼。TOTP 不會保存。為了讓 DSM 可在沒有 OTP 的情況下核發登入工作階段，NAS 密碼會與裝置識別碼一起使用 Fernet 加密，密文保存在 `/data/nas-schedule-credentials.enc`。
+
+DSM 登入 API 文件說明 v6 可註冊裝置識別碼，之後以同一裝置名稱和 ID 登入時略過 OTP：[Synology DSM Login Web API Guide](https://global.download.synology.com/download/Document/Software/DeveloperGuide/Os/DSM/All/enu/DSM_Login_Web_API_Guide_enu.pdf)。
+
+加密金鑰必須由管理者在 NAS 主機建立一次，不能放在 `.env`、Git 或 `tagger-data` volume。範例：
+
+```sh
+mkdir -p /volume1/docker/synology-photo-tagger
+umask 077
+python3 -c 'import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())' > /volume1/docker/synology-photo-tagger/nas-schedule-key
+chmod 600 /volume1/docker/synology-photo-tagger/nas-schedule-key
+```
+
+將 `.env` 的 `NAS_SCHEDULE_KEY_SOURCE` 指向這個檔案，再重新建立容器。Compose 會以唯讀 secret 檔案掛載到 `/run/secrets/nas-schedule-key`；Compose secret 本身不會替一般 Docker Compose 加密主機上的來源檔，因此應限制主機檔案權限並納入 NAS 備份保護。遺失金鑰會使既有密文無法解密；請先移除此服務保存的裝置資料，再以新金鑰重新註冊。DSM 可從帳號的雙重驗證受信任裝置管理頁撤銷該裝置。按「移除此服務的排程登入資料」只刪除 Photo Tagger 內的密文，不會撤銷 DSM 裝置授權。
 
 ### Debug shell
 

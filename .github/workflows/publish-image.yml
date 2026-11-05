@@ -13,6 +13,16 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run unit tests
+        run: |
+          python -m pip install -r requirements.txt
+          python -m unittest discover -s tests -v
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -32,7 +42,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            wenchiehlee1020/synology-photo-tagger:v0.4.9
+            wenchiehlee1020/synology-photo-tagger:v0.4.10
 
       - name: Remove non-version image tags
         env:
@@ -95,5 +105,5 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
           repository: wenchiehlee1020/synology-photo-tagger
-          short-description: Synology Photos AI tagging with clearer photo library, work creation, and results navigation (v0.4.9).
+          short-description: Synology Photos AI tagging with scheduled work and trusted-device login (v0.4.10).
           readme-filepath: ./DOCKERHUB.md

@@ -5,4 +5,5 @@ __pycache__
 *.py[cod]
 .env
 data
+secrets
 debug/authorized_keys

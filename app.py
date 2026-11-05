@@ -10,11 +10,14 @@ import sqlite3
 import threading
 import time
 import uuid
+from pathlib import Path
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from urllib.parse import urlencode, urlsplit
+
+from cryptography.fernet import Fernet, InvalidToken
 
 import requests
 from flask import Flask, Response, copy_current_request_context, jsonify, render_template, request, session
@@ -38,7 +41,7 @@ API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 NAS_SESSION_TTL_SECONDS = 12 * 60 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.4.9")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.4.10")
 TAGGER_DB_PATH = os.environ.get(
     "TAGGER_DB_PATH", os.path.join(os.path.dirname(__file__), "data", "photo-tagger.sqlite3")
 )
@@ -102,10 +105,22 @@ _photo_analysis_executor = ThreadPoolExecutor(
     max_workers=PHOTO_ANALYSIS_MAX_CONCURRENT_JOBS,
     thread_name_prefix="photo-analysis",
 )
-TAG_JOB_MAX_CANDIDATES = 300
+TAG_JOB_MAX_CANDIDATES = 1000
 TAG_JOB_MAX_SCAN_PAGES = 40
 TAG_JOB_MAX_RUNNING = 4
 _tag_job_submit_lock = threading.Lock()
+TAIPEI_TZ = timezone(timedelta(hours=8), name="Asia/Taipei")
+NAS_SCHEDULE_CREDENTIALS_PATH = os.environ.get(
+    "NAS_SCHEDULE_CREDENTIALS_PATH", "/data/nas-schedule-credentials.enc"
+)
+NAS_SCHEDULE_KEY_FILE = os.environ.get("NAS_SCHEDULE_KEY_FILE", "/run/secrets/nas-schedule-key")
+_scheduled_nas_tokens: dict[str, str] = {}
+_scheduled_nas_tokens_lock = threading.Lock()
+_schedule_restore_last_attempt = 0.0
+_schedule_restore_last_success = 0.0
+_schedule_restore_lock = threading.Lock()
+_scheduled_jobs_active: set[str] = set()
+_scheduled_jobs_active_lock = threading.Lock()
 
 
 @contextmanager
@@ -177,6 +192,23 @@ def initialize_tag_job_db() -> None:
                 processed_at REAL NOT NULL,
                 PRIMARY KEY(owner_key, space, photo_id)
             );
+            CREATE TABLE IF NOT EXISTS tag_job_schedules (
+                id TEXT PRIMARY KEY,
+                owner_key TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                daily_time TEXT NOT NULL,
+                space TEXT NOT NULL,
+                criteria_json TEXT NOT NULL,
+                next_run_at REAL NOT NULL,
+                last_run_date TEXT,
+                last_job_id TEXT,
+                last_status TEXT NOT NULL DEFAULT 'scheduled',
+                last_error TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS tag_job_schedules_owner
+                ON tag_job_schedules(owner_key, enabled, next_run_at);
             """
         )
         job_columns = {row["name"] for row in db.execute("PRAGMA table_info(tag_jobs)").fetchall()}
@@ -287,6 +319,143 @@ def post_synology(client: requests.Session, url: str, data: dict) -> dict:
     if not payload.get("success"):
         raise SynologyApiError(api_message(payload), api_error(payload), api_error_details(payload))
     return payload
+
+
+def schedule_credential_cipher() -> Fernet | None:
+    try:
+        key = Path(NAS_SCHEDULE_KEY_FILE).read_bytes().strip()
+        return Fernet(key) if key else None
+    except (OSError, ValueError):
+        return None
+
+
+def encrypted_schedule_credentials() -> dict | None:
+    cipher = schedule_credential_cipher()
+    if not cipher:
+        return None
+    try:
+        encrypted = Path(NAS_SCHEDULE_CREDENTIALS_PATH).read_bytes()
+        payload = json.loads(cipher.decrypt(encrypted))
+    except (OSError, InvalidToken, ValueError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def save_schedule_credentials(credentials: dict) -> bool:
+    cipher = schedule_credential_cipher()
+    if not cipher:
+        return False
+    path = Path(NAS_SCHEDULE_CREDENTIALS_PATH)
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        temporary = path.with_name(path.name + ".tmp")
+        file_descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(file_descriptor, "wb") as credential_file:
+            credential_file.write(cipher.encrypt(json.dumps(credentials, ensure_ascii=False).encode()))
+        temporary.replace(path)
+        os.chmod(path, 0o600)
+        return True
+    except OSError:
+        app.logger.exception("Could not save encrypted trusted-device credentials")
+        return False
+
+
+def delete_schedule_credentials() -> None:
+    try:
+        Path(NAS_SCHEDULE_CREDENTIALS_PATH).unlink(missing_ok=True)
+    except OSError:
+        app.logger.exception("Could not remove encrypted trusted-device credentials")
+
+
+def owner_key_for(base_url: str, account: str) -> str:
+    return hashlib.sha256(f"{base_url.casefold()}|{account.casefold()}".encode()).hexdigest()
+
+
+def login_to_synology(base_url: str, username: str, password: str, otp_code: str = "",
+                       device_id: str = "", register_device: bool = False):
+    client, api_prefix, catalog = discover_catalog(base_url)
+    auth_info = catalog.get("SYNO.API.Auth", {})
+    if not isinstance(auth_info, dict):
+        client.close()
+        raise SynologyApiError("NAS 未回報 SYNO.API.Auth 登入 API。")
+    auth_path = auth_info.get("path", "auth.cgi")
+    max_version = auth_info.get("maxVersion", 3)
+    if not isinstance(auth_path, str) or not isinstance(max_version, int):
+        client.close()
+        raise SynologyApiError("NAS 回報的登入 API 資料格式不符。")
+    if (register_device or device_id) and max_version < 6:
+        client.close()
+        raise SynologyApiError("此 DSM 未提供支援受信任裝置的登入 API v6；請更新 DSM 或停用定期工作登入。")
+    auth_url = f"{base_url}{auth_path}" if auth_path.startswith("/") else f"{base_url}{api_prefix}/{auth_path}"
+    data = {
+        "api": "SYNO.API.Auth", "version": 6 if (register_device or device_id) else max_version,
+        "method": "login", "account": username, "passwd": password,
+        "session": "SynologyPhotoTagger", "format": "sid",
+    }
+    if otp_code:
+        data["otp_code"] = otp_code
+    if register_device:
+        data["enable_device_token"] = "yes"
+        data["device_name"] = "Synology-Photo-Tagger"
+    if device_id:
+        data["device_name"] = "Synology-Photo-Tagger"
+        data["device_id"] = device_id
+    try:
+        payload = post_synology(client, auth_url, data)
+        response_data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        sid = response_data.get("sid")
+        if not isinstance(sid, str) or not sid:
+            raise SynologyApiError("NAS 登入回應沒有 Session ID。")
+        did = response_data.get("did") or response_data.get("device_id")
+        return client, api_prefix, catalog, sid, did
+    except Exception:
+        client.close()
+        raise
+
+
+def restore_scheduled_nas_session(force: bool = False) -> bool:
+    global _schedule_restore_last_attempt, _schedule_restore_last_success
+    with _schedule_restore_lock:
+        now = time.monotonic()
+        cooldown = 6 * 60 * 60 if _schedule_restore_last_success else 300
+        if not force and now - _schedule_restore_last_attempt < cooldown:
+            return False
+        _schedule_restore_last_attempt = now
+    credentials = encrypted_schedule_credentials()
+    if not credentials or credentials.get("base_url") != configured_base_url():
+        return False
+    username, password, device_id = (credentials.get(key) for key in ("username", "password", "device_id"))
+    if not all(isinstance(value, str) and value for value in (username, password, device_id)):
+        return False
+    try:
+        client, prefix, catalog, sid, _ = login_to_synology(
+            credentials["base_url"], username, password, device_id=device_id
+        )
+        token = secrets.token_urlsafe(32)
+        with _nas_sessions_lock:
+            _nas_sessions[token] = NasSession(client, sid, prefix, catalog, time.monotonic())
+        with _scheduled_nas_tokens_lock:
+            owner_key = owner_key_for(credentials["base_url"], username)
+            previous_token = _scheduled_nas_tokens.get(owner_key)
+            _scheduled_nas_tokens[owner_key] = token
+        if previous_token and previous_token != token:
+            with _nas_sessions_lock:
+                previous = _nas_sessions.pop(previous_token, None)
+            if previous:
+                try:
+                    auth_url, auth_version = api_endpoint(previous, "SYNO.API.Auth")
+                    post_synology(previous.client, auth_url, {
+                        "api": "SYNO.API.Auth", "version": auth_version,
+                        "method": "logout", "session": "SynologyPhotoTagger", "_sid": previous.sid,
+                    })
+                except SynologyApiError:
+                    pass
+                previous.client.close()
+        _schedule_restore_last_success = time.monotonic()
+        return True
+    except SynologyApiError as exc:
+        app.logger.warning("Trusted-device NAS login failed: %s", str(exc))
+        return False
 
 
 def discover_catalog(base_url: str) -> tuple[requests.Session, str, dict]:
@@ -723,42 +892,23 @@ def login():
     username = str(body.get("username", "")).strip()
     password = str(body.get("password", ""))
     otp_code = str(body.get("otp_code", "")).strip()
+    register_device = body.get("register_trusted_device") is True
     base_url = configured_base_url()
     validation_error = validate_base_url(base_url)
     if validation_error:
         return jsonify({"ok": False, "error": validation_error}), 400
     if not username or not password:
         return jsonify({"ok": False, "error": "請輸入 NAS 帳號與密碼。"}), 400
+    if register_device and urlsplit(base_url).scheme != "https":
+        return jsonify({"ok": False, "error": "受信任裝置登入必須使用 HTTPS 的 NAS 位址。"}), 400
+    if register_device and not schedule_credential_cipher():
+        return jsonify({"ok": False, "error": "尚未設定排程加密金鑰。請管理者先設定 NAS_SCHEDULE_KEY_SOURCE，再重新部署。"}), 409
 
     client = None
     try:
-        client, api_prefix, catalog = discover_catalog(base_url)
-        auth_info = catalog.get("SYNO.API.Auth", {})
-        if not isinstance(auth_info, dict):
-            raise SynologyApiError("NAS 未回報 SYNO.API.Auth 登入 API。")
-        auth_path = auth_info.get("path", "auth.cgi")
-        auth_version = auth_info.get("maxVersion", 3)
-        if not isinstance(auth_path, str) or not isinstance(auth_version, int):
-            raise SynologyApiError("NAS 回報的登入 API 資料格式不符。")
-        if auth_path.startswith("/"):
-            auth_url = f"{base_url}{auth_path}"
-        else:
-            auth_url = f"{base_url}{api_prefix}/{auth_path}"
-        data = {
-            "api": "SYNO.API.Auth",
-            "version": auth_version,
-            "method": "login",
-            "account": username,
-            "passwd": password,
-            "session": "SynologyPhotoTagger",
-            "format": "sid",
-        }
-        if otp_code:
-            data["otp_code"] = otp_code
-        payload = post_synology(client, auth_url, data)
-        sid = payload.get("data", {}).get("sid") if isinstance(payload.get("data"), dict) else None
-        if not isinstance(sid, str) or not sid:
-            raise SynologyApiError("NAS 登入回應沒有 Session ID。")
+        client, api_prefix, catalog, sid, did = login_to_synology(
+            base_url, username, password, otp_code, register_device=register_device
+        )
 
         old_token = session.get("nas_session_token")
         if old_token:
@@ -785,7 +935,29 @@ def login():
         session.permanent = True
         session["nas_session_token"] = token
         session["nas_account"] = username
-        return jsonify({"ok": True, "message": "NAS 登入成功。"})
+        owner_key = tag_job_owner_key()
+        has_schedule_credentials = bool(encrypted_schedule_credentials())
+        if owner_key and not register_device and not has_schedule_credentials:
+            with _scheduled_nas_tokens_lock:
+                _scheduled_nas_tokens[owner_key] = token
+        message = "NAS 登入成功。"
+        if register_device:
+            if isinstance(did, str) and did:
+                credential_saved = save_schedule_credentials({
+                    "base_url": base_url, "username": username, "password": password,
+                    "device_id": did, "device_name": "Synology-Photo-Tagger",
+                })
+                if credential_saved:
+                    message += " 已註冊此裝置供每日排程登入；密碼已加密保存，TOTP 未保存。"
+                    restore_scheduled_nas_session(force=True)
+                else:
+                    message += " NAS 登入成功，但無法保存受信任裝置資料；請確認排程加密金鑰已設定。"
+            else:
+                message += " NAS 登入成功，但 NAS 未回傳裝置識別碼，未啟用每日排程登入。"
+        elif has_schedule_credentials:
+            # Keep a separate device-token session alive; the browser's session may log out independently.
+            restore_scheduled_nas_session(force=True)
+        return jsonify({"ok": True, "message": message})
     except SynologyApiError as exc:
         if client:
             client.close()
@@ -794,8 +966,15 @@ def login():
 
 @app.post("/api/logout")
 def logout():
+    owner_key = tag_job_owner_key()
     token = session.pop("nas_session_token", None)
     session.pop("nas_account", None)
+    if owner_key:
+        with _scheduled_nas_tokens_lock:
+            scheduled_token = _scheduled_nas_tokens.get(owner_key)
+        if scheduled_token == token and not encrypted_schedule_credentials():
+            with _scheduled_nas_tokens_lock:
+                _scheduled_nas_tokens.pop(owner_key, None)
     if token:
         with _japan_searches_lock:
             _japan_searches.pop((token, "personal"), None)
@@ -1620,6 +1799,157 @@ def prepare_tag_job(job_id: str, owner_key: str, nas_token: str, space: str, cri
             )
 
 
+def daily_schedule_datetime(day: date, time_text: str) -> datetime:
+    return datetime.combine(day, datetime_time.fromisoformat(time_text), tzinfo=TAIPEI_TZ)
+
+
+def next_daily_schedule_epoch(time_text: str, after: datetime | None = None) -> float:
+    current = after.astimezone(TAIPEI_TZ) if after else datetime.now(TAIPEI_TZ)
+    scheduled = daily_schedule_datetime(current.date(), time_text)
+    if scheduled <= current:
+        scheduled += timedelta(days=1)
+    return scheduled.timestamp()
+
+
+def set_schedule_last_status(schedule_id: str, status: str, error: str | None = None) -> None:
+    with tag_job_db() as db:
+        db.execute(
+            "UPDATE tag_job_schedules SET last_status=?, last_error=?, updated_at=? WHERE id=?",
+            (status, error[:500] if error else None, time.time(), schedule_id),
+        )
+
+
+def run_scheduled_tag_job(schedule_id: str, job_id: str, owner_key: str, nas_token: str,
+                          space: str, criteria: dict) -> None:
+    try:
+        token = nas_token
+        with app.test_request_context("/"):
+            session["nas_session_token"] = token
+            nas = current_nas_session()
+            if not nas:
+                set_schedule_last_status(schedule_id, "waiting_login", "NAS 登入工作階段已失效；請重新登入後再執行今日排程。")
+                with tag_job_db() as db:
+                    db.execute("UPDATE tag_jobs SET status='failed', error='NAS 登入工作階段已失效；今日排程未執行。', updated_at=? WHERE id=?", (time.time(), job_id))
+                return
+            with _photo_library_indexes_lock:
+                _photo_library_indexes.pop((token, space), None)
+            with _japan_searches_lock:
+                _japan_searches.pop((token, space), None)
+            prepare_tag_job(job_id, owner_key, token, space, criteria)
+            with tag_job_db() as db:
+                job = get_tag_job(db, owner_key, job_id)
+            if not job:
+                set_schedule_last_status(schedule_id, "failed", "建立每日 AI 標記工作失敗。")
+                return
+            if job["status"] == "empty":
+                set_schedule_last_status(schedule_id, "empty")
+                return
+            if job["status"] != "ready":
+                set_schedule_last_status(schedule_id, "failed", job["error"] or "建立候選快照失敗。")
+                return
+            queued, error = queue_tag_job_analysis(job_id, owner_key, token)
+            if not queued:
+                set_schedule_last_status(schedule_id, "failed", error or "無法啟動每日 AI 標記工作。")
+                return
+            set_schedule_last_status(schedule_id, "analyzing")
+    except Exception as exc:
+        app.logger.exception("Scheduled AI tagging failed for schedule %s", schedule_id)
+        set_schedule_last_status(schedule_id, "failed", str(exc))
+    finally:
+        with _scheduled_jobs_active_lock:
+            _scheduled_jobs_active.discard(schedule_id)
+
+
+def run_due_tag_job_schedules() -> None:
+    now = datetime.now(TAIPEI_TZ)
+    now_epoch = now.timestamp()
+    with tag_job_db() as db:
+        schedules = db.execute(
+            "SELECT * FROM tag_job_schedules WHERE enabled=1 AND next_run_at<=? ORDER BY next_run_at LIMIT 10",
+            (now_epoch,),
+        ).fetchall()
+    if schedules:
+        restore_scheduled_nas_session()
+    for schedule in schedules:
+        schedule_id = schedule["id"]
+        with _scheduled_jobs_active_lock:
+            if schedule_id in _scheduled_jobs_active:
+                continue
+            _scheduled_jobs_active.add(schedule_id)
+        owner_key = schedule["owner_key"]
+        with _scheduled_nas_tokens_lock:
+            nas_token = _scheduled_nas_tokens.get(owner_key)
+        if not nas_token:
+            restore_scheduled_nas_session()
+            with _scheduled_nas_tokens_lock:
+                nas_token = _scheduled_nas_tokens.get(owner_key)
+            if not nas_token:
+                with _scheduled_jobs_active_lock:
+                    _scheduled_jobs_active.discard(schedule_id)
+                set_schedule_last_status(schedule_id, "waiting_login", "受信任裝置登入尚未就緒；請在設定中重新登入並註冊此裝置。")
+                continue
+        with app.test_request_context("/"):
+            session["nas_session_token"] = nas_token
+            if not current_nas_session():
+                with _scheduled_nas_tokens_lock:
+                    _scheduled_nas_tokens.pop(owner_key, None)
+                with _scheduled_jobs_active_lock:
+                    _scheduled_jobs_active.discard(schedule_id)
+                set_schedule_last_status(schedule_id, "waiting_login", "NAS 登入工作階段已失效；請重新登入後補執行今日排程。")
+                continue
+        scheduled_day = datetime.fromtimestamp(schedule["next_run_at"], TAIPEI_TZ).date()
+        # If the container or NAS was offline past the scheduled day, run only today's batch.
+        run_day = max(scheduled_day, now.date())
+        criteria = json.loads(schedule["criteria_json"])
+        criteria.update(date_from=run_day.isoformat(), date_to=run_day.isoformat())
+        job_id = uuid.uuid4().hex
+        run_at = time.time()
+        next_run = daily_schedule_datetime(run_day + timedelta(days=1), schedule["daily_time"]).timestamp()
+        try:
+            with tag_job_db() as db:
+                current = db.execute("SELECT last_run_date FROM tag_job_schedules WHERE id=? AND enabled=1", (schedule_id,)).fetchone()
+                if not current or current["last_run_date"] == run_day.isoformat():
+                    with _scheduled_jobs_active_lock:
+                        _scheduled_jobs_active.discard(schedule_id)
+                    continue
+                running = db.execute(
+                    "SELECT COUNT(*) FROM tag_jobs WHERE owner_key=? AND status IN ('preparing','analyzing','writing','undoing')",
+                    (owner_key,),
+                ).fetchone()[0]
+                if running >= TAG_JOB_MAX_RUNNING:
+                    with _scheduled_jobs_active_lock:
+                        _scheduled_jobs_active.discard(schedule_id)
+                    continue
+                db.execute(
+                    "INSERT INTO tag_jobs(id, owner_key, space, task, criteria_json, status, created_at, updated_at) VALUES(?,?,?,?,?,'preparing',?,?)",
+                    (job_id, owner_key, schedule["space"], "photo", json.dumps(criteria, ensure_ascii=False), run_at, run_at),
+                )
+                db.execute(
+                    "UPDATE tag_job_schedules SET next_run_at=?, last_run_date=?, last_job_id=?, last_status='preparing', last_error=NULL, updated_at=? WHERE id=?",
+                    (next_run, run_day.isoformat(), job_id, run_at, schedule_id),
+                )
+            _photo_analysis_executor.submit(
+                run_scheduled_tag_job, schedule_id, job_id, owner_key, nas_token, schedule["space"], criteria,
+            )
+        except Exception as exc:
+            with _scheduled_jobs_active_lock:
+                _scheduled_jobs_active.discard(schedule_id)
+            set_schedule_last_status(schedule_id, "failed", str(exc))
+
+
+def tag_schedule_worker() -> None:
+    while True:
+        try:
+            with tag_job_db() as db:
+                enabled = db.execute("SELECT 1 FROM tag_job_schedules WHERE enabled=1 LIMIT 1").fetchone()
+            if enabled:
+                restore_scheduled_nas_session()
+            run_due_tag_job_schedules()
+        except Exception:
+            app.logger.exception("Tag schedule poll failed")
+        time.sleep(30)
+
+
 @app.get("/api/tag-jobs")
 def list_tag_jobs():
     if not current_nas_session():
@@ -1717,6 +2047,148 @@ def create_tag_job():
             db.execute("UPDATE tag_jobs SET status='failed', error='無法啟動工作。', updated_at=? WHERE id=?", (time.time(), job_id))
         return jsonify({"ok": False, "error": "無法啟動標記工作。"}), 503
     return jsonify({"ok": True, "job_id": job_id, "status": "preparing"}), 202
+
+
+@app.get("/api/tag-job-schedules")
+def list_tag_job_schedules():
+    if not current_nas_session():
+        return jsonify({"ok": False, "error": "請先登入 Synology Photos。"}), 401
+    owner_key = tag_job_owner_key()
+    with tag_job_db() as db:
+        rows = db.execute(
+            "SELECT s.*, j.status AS job_status, j.error AS job_error FROM tag_job_schedules s "
+            "LEFT JOIN tag_jobs j ON j.id=s.last_job_id WHERE s.owner_key=? ORDER BY s.created_at DESC",
+            (owner_key,),
+        ).fetchall()
+    schedules = []
+    for row in rows:
+        item = dict(row)
+        item["criteria"] = json.loads(item.pop("criteria_json"))
+        item["next_run"] = datetime.fromtimestamp(item.pop("next_run_at"), TAIPEI_TZ).strftime("%Y-%m-%d %H:%M")
+        item["last_status"] = item.pop("job_status") or item["last_status"]
+        item["last_error"] = item.pop("job_error") or item["last_error"]
+        schedules.append(item)
+    credentials = encrypted_schedule_credentials()
+    credentials_registered = bool(credentials and credentials.get("device_id"))
+    credentials_match = bool(credentials_registered and owner_key_for(
+        credentials.get("base_url", ""), credentials.get("username", "")
+    ) == owner_key)
+    return jsonify({"ok": True, "schedules": schedules,
+                    "trusted_device_registered": credentials_match,
+                    "trusted_device_account_mismatch": credentials_registered and not credentials_match,
+                    "schedule_key_ready": schedule_credential_cipher() is not None})
+
+
+@app.delete("/api/trusted-device")
+def forget_trusted_device():
+    if not current_nas_session():
+        return jsonify({"ok": False, "error": "請先登入 Synology Photos。"}), 401
+    owner_key = tag_job_owner_key()
+    credentials = encrypted_schedule_credentials()
+    if credentials and owner_key_for(credentials.get("base_url", ""), credentials.get("username", "")) != owner_key:
+        return jsonify({"ok": False, "error": "目前登入帳號與已註冊排程帳號不同。"}), 403
+    delete_schedule_credentials()
+    with _scheduled_nas_tokens_lock:
+        token = _scheduled_nas_tokens.pop(owner_key, None) if owner_key else None
+    if token:
+        with _nas_sessions_lock:
+            nas = _nas_sessions.pop(token, None)
+        if nas:
+            nas.client.close()
+    return jsonify({"ok": True, "message": "已移除此服務中的加密登入資料。若要撤銷 NAS 端裝置授權，請到 DSM 的雙重驗證受信任裝置清單移除。"})
+
+
+@app.post("/api/tag-job-schedules")
+def create_tag_job_schedule():
+    if not current_nas_session():
+        return jsonify({"ok": False, "error": "請先登入 Synology Photos。"}), 401
+    owner_key = tag_job_owner_key()
+    credentials = encrypted_schedule_credentials()
+    if not credentials or not credentials.get("device_id"):
+        return jsonify({"ok": False, "error": "請先登入時勾選「註冊此裝置供定期工作登入」，完成 Synology 受信任裝置註冊。"}), 409
+    if owner_key_for(credentials.get("base_url", ""), credentials.get("username", "")) != owner_key:
+        return jsonify({"ok": False, "error": "目前登入帳號與排程受信任裝置帳號不同；請使用已註冊的 NAS 帳號建立工作。"}), 403
+    body = request.get_json(silent=True) or {}
+    daily_time = body.get("daily_time", "02:00")
+    try:
+        parsed_time = datetime_time.fromisoformat(daily_time)
+        if parsed_time.second or parsed_time.microsecond:
+            raise ValueError
+        daily_time = parsed_time.strftime("%H:%M")
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "排程時間請使用小時與分鐘。"}), 400
+    space = body.get("space", "personal")
+    country = body.get("country", "")
+    raw_tags = body.get("tags", [])
+    try:
+        max_candidates = int(body.get("max_candidates", 100))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "候選照片上限格式無效。"}), 400
+    if space not in {"personal", "shared"} or country not in {"", "japan"}:
+        return jsonify({"ok": False, "error": "照片空間或地點條件無效。"}), 400
+    if not isinstance(raw_tags, list) or len(raw_tags) > 30 or any(not isinstance(tag, str) for tag in raw_tags):
+        return jsonify({"ok": False, "error": "標籤條件格式無效。"}), 400
+    tags = list(dict.fromkeys(tag.strip() for tag in raw_tags if tag.strip()))
+    if any(len(tag) > 64 for tag in tags) or ("__untagged__" in tags and len(tags) > 1):
+        return jsonify({"ok": False, "error": "標籤條件無效；「未加標籤」不能與其他標籤同時選擇。"}), 400
+    if not isinstance(body.get("dry_run", False), bool) or not isinstance(body.get("skip_processed", True), bool):
+        return jsonify({"ok": False, "error": "工作選項格式無效。"}), 400
+    if max_candidates < 1 or max_candidates > TAG_JOB_MAX_CANDIDATES:
+        return jsonify({"ok": False, "error": f"候選照片上限不可超過 {TAG_JOB_MAX_CANDIDATES} 張。"}), 400
+    criteria = {
+        "country": country, "tags": tags, "date_from": "", "date_to": "",
+        "max_candidates": max_candidates, "dry_run": body.get("dry_run", False),
+        "skip_processed": body.get("skip_processed", True),
+    }
+    schedule_id = uuid.uuid4().hex
+    now = datetime.now(TAIPEI_TZ)
+    with tag_job_db() as db:
+        db.execute(
+            "INSERT INTO tag_job_schedules(id, owner_key, enabled, daily_time, space, criteria_json, next_run_at, last_status, created_at, updated_at) "
+            "VALUES(?,?,1,?,?,?,?, 'scheduled',?,?)",
+            (schedule_id, owner_key, daily_time, space, json.dumps(criteria, ensure_ascii=False),
+             next_daily_schedule_epoch(daily_time, now), time.time(), time.time()),
+        )
+    return jsonify({"ok": True, "schedule_id": schedule_id}), 201
+
+
+@app.patch("/api/tag-job-schedules/<schedule_id>")
+def update_tag_job_schedule(schedule_id: str):
+    if not current_nas_session():
+        return jsonify({"ok": False, "error": "請先登入 Synology Photos。"}), 401
+    if len(schedule_id) != 32 or any(char not in "0123456789abcdef" for char in schedule_id):
+        return jsonify({"ok": False, "error": "排程識別碼格式無效。"}), 400
+    enabled = (request.get_json(silent=True) or {}).get("enabled")
+    if not isinstance(enabled, bool):
+        return jsonify({"ok": False, "error": "排程啟用狀態格式無效。"}), 400
+    owner_key = tag_job_owner_key()
+    with tag_job_db() as db:
+        row = db.execute(
+            "SELECT daily_time, next_run_at FROM tag_job_schedules WHERE id=? AND owner_key=?",
+            (schedule_id, owner_key),
+        ).fetchone()
+        if not row:
+            return jsonify({"ok": False, "error": "找不到此排程。"}), 404
+        next_run = row["next_run_at"]
+        if enabled and next_run <= time.time():
+            next_run = next_daily_schedule_epoch(row["daily_time"])
+        db.execute(
+            "UPDATE tag_job_schedules SET enabled=?, next_run_at=?, last_status=?, last_error=NULL, updated_at=? WHERE id=? AND owner_key=?",
+            (int(enabled), next_run, "scheduled" if enabled else "paused", time.time(), schedule_id, owner_key),
+        )
+    return jsonify({"ok": True})
+
+
+@app.delete("/api/tag-job-schedules/<schedule_id>")
+def delete_tag_job_schedule(schedule_id: str):
+    if not current_nas_session():
+        return jsonify({"ok": False, "error": "請先登入 Synology Photos。"}), 401
+    owner_key = tag_job_owner_key()
+    with tag_job_db() as db:
+        cursor = db.execute("DELETE FROM tag_job_schedules WHERE id=? AND owner_key=?", (schedule_id, owner_key))
+    if not cursor.rowcount:
+        return jsonify({"ok": False, "error": "找不到此排程。"}), 404
+    return jsonify({"ok": True})
 
 
 @app.get("/api/tag-jobs/<job_id>")
@@ -3128,3 +3600,6 @@ def photo_ocr_status(task_id: str):
         return jsonify({"ok": False, "error": "找不到 OCR 工作或工作已逾期。"}), status
     except (requests.exceptions.RequestException, ValueError):
         return jsonify({"ok": False, "error": "無法查詢 Mac-mini OCR 工作狀態。"}), 502
+
+
+threading.Thread(target=tag_schedule_worker, name="tag-job-scheduler", daemon=True).start()
