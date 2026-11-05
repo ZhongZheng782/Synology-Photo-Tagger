@@ -69,7 +69,7 @@ class TrustedDeviceTests(unittest.TestCase):
         )
 
         self.assertEqual(result[3:], ("session-id", "device-id"))
-        auth_url, params = post.call_args.args
+        _, auth_url, params = post.call_args.args
         self.assertEqual(auth_url, "https://nas.example:5001/webapi/entry.cgi")
         self.assertEqual(params["version"], 6)
         self.assertEqual(params["enable_device_token"], "yes")
@@ -91,7 +91,7 @@ class TrustedDeviceTests(unittest.TestCase):
             "https://nas.example:5001", "photo-user", "password", device_id="device-id"
         )
 
-        params = post.call_args.args[1]
+        params = post.call_args.args[2]
         self.assertEqual(params["version"], 6)
         self.assertEqual(params["device_name"], "Synology-Photo-Tagger")
         self.assertEqual(params["device_id"], "device-id")
