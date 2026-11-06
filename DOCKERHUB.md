@@ -1,4 +1,4 @@
-# Synology Photo Tagger v0.4.10
+# Synology Photo Tagger v0.4.11
 
 A Python web app for browsing Synology Photos, generating photo descriptions and tags, and applying verified updates through the Synology Photos API.
 
@@ -30,6 +30,7 @@ A Python web app for browsing Synology Photos, generating photo descriptions and
 - Replaces one existing tag with another across all photos carrying the source tag; the affected count is shown before confirmation and writes are processed in chunks of up to 25 with readback verification.
 - Supports daily AI tagging schedules that scan photos taken on the run date and reuse the selected job settings.
 - Can register a Synology trusted device for unattended schedule login. The NAS password and device ID are encrypted with a separate host-mounted key; TOTP is never stored. The trusted device can be revoked in DSM.
+- Uses the UX-Deck Lucide squirrel mark as the browser favicon and app brand icon.
 
 v0.4.8 narrows the default skip rule to photos with a recorded successful AI description or AI tag write. A successful tag rename alone does not exclude a photo; skipped photos are excluded before analysis, so the job will not request AI descriptions or additional tags for them. It retains v0.4.7's larger job metrics and removal of the misleading development label, along with v0.4.6's general photo descriptions and tags, automatic verified writes, and Dry run. Existing descriptions are preserved and not replaced; AI descriptions are added only when a photo has no description. Photos API writes may update original-file metadata. The application stores job records in SQLite on the persistent `tagger-data` volume, marks interrupted analysis as failed and interrupted writes as uncertain on restart, and never blindly retries an uncertain write. It does not store original photos or OCR text in job records. Browser login sessions can remain valid for up to 12 idle hours; the signing key persists on `tagger-data`, but NAS passwords and OTP codes are never stored. Restarting the container clears the in-memory NAS API session and may require a new login. The AI uses `證件` only for formal credentials meant to establish a holder’s identity; reports, forms, receipts, and test results are `文件` or a more specific content tag even when they contain a name or number. Batch tag replacement remains available in chunks of up to 25, with destination and source tag readback verification. Synology Photos API behavior can vary by DSM and Photos version.
 
@@ -43,12 +44,12 @@ docker compose up -d
 
 Open `http://localhost:5056/`. Set `SYNOLOGY_URL` to the DSM address reachable from the container. Sign in through the web UI with a Synology account that can access Photos.
 
-The provided Compose file uses the versioned `v0.4.10` image tag. This release adds candidate caps up to 1,000 and recurring daily AI tagging with Synology trusted-device authentication. Photo library filters do not become AI job criteria. Docker Hub retains only tags in the `vX.Y.Z` format; the publishing workflow removes floating (`latest`), commit (`sha-*`), and non-three-part version tags. Set `MLX_SERVER_URL`, `MLX_SERVER_API_KEY`, and a dedicated Tailscale `TAILSCALE_AUTHKEY` in `.env` to enable analysis. `MLX_OCR_ENGINE` selects `baidu` (default) or `glm` for document OCR. Tailscale node state and AI job records plus the session signing key persist in Docker named volumes. For schedules, create the host Fernet key file described in README and set `NAS_DOCKER_ROOT` and `NAS_SCHEDULE_KEY_SOURCE` in `.env` before deployment.
+The provided Compose file uses the versioned `v0.4.11` image tag. This patch adds the UX-Deck Lucide squirrel favicon. The image includes candidate caps up to 1,000 and recurring daily AI tagging with Synology trusted-device authentication. Photo library filters do not become AI job criteria. Docker Hub retains only tags in the `vX.Y.Z` format; the publishing workflow removes floating (`latest`), commit (`sha-*`), and non-three-part version tags. Set `MLX_SERVER_URL`, `MLX_SERVER_API_KEY`, and a dedicated Tailscale `TAILSCALE_AUTHKEY` in `.env` to enable analysis. `MLX_OCR_ENGINE` selects `baidu` (default) or `glm` for document OCR. Tailscale node state and AI job records plus the session signing key persist in Docker named volumes. For schedules, create the host Fernet key file described in README and set `NAS_DOCKER_ROOT` and `NAS_SCHEDULE_KEY_SOURCE` in `.env` before deployment.
 
 ## Image
 
 ```sh
-docker pull wenchiehlee1020/synology-photo-tagger:v0.4.10
+docker pull wenchiehlee1020/synology-photo-tagger:v0.4.11
 ```
 
 Source: [GitHub](https://github.com/ZhongZheng782/Synology-Photo-Tagger)

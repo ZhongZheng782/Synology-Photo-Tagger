@@ -1,6 +1,6 @@
 services:
   synology-photo-tagger:
-    image: wenchiehlee1020/synology-photo-tagger:v0.4.10
+    image: wenchiehlee1020/synology-photo-tagger:v0.4.11
     build: .
     container_name: SYNOLOGY-PHOTO-TAGGER
     restart: unless-stopped
