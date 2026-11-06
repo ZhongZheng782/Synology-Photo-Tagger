@@ -41,7 +41,7 @@ API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 NAS_SESSION_TTL_SECONDS = 12 * 60 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.4.11")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.4.12")
 TAGGER_DB_PATH = os.environ.get(
     "TAGGER_DB_PATH", os.path.join(os.path.dirname(__file__), "data", "photo-tagger.sqlite3")
 )
@@ -738,30 +738,53 @@ def photo_library_index(token: str, space: str) -> PhotoLibraryIndex:
 
 
 def scan_photo_library_page(
-    nas: NasSession, api_name: str, url: str, version: int, index: PhotoLibraryIndex
+    nas: NasSession, api_name: str, url: str, version: int, index: PhotoLibraryIndex,
+    criteria: dict | None = None,
 ) -> None:
     # Keep only one NAS page in flight for an index, even if the browser polls quickly.
     with _photo_library_indexes_lock:
         if index.complete:
             return
+        request = {
+            "api": api_name,
+            "version": version,
+            "method": "list",
+            "offset": index.source_offset,
+            "limit": MAX_PAGE_SIZE,
+            "type": "photo",
+            "sort_by": "takentime",
+            "sort_direction": "desc",
+            "additional": json.dumps(
+                ["thumbnail", "resolution", "gps", "address", "tag"],
+                separators=(",", ":"),
+            ),
+            "_sid": nas.sid,
+        }
+        date_from = criteria.get("date_from") if isinstance(criteria, dict) else None
+        date_to = criteria.get("date_to") if isinstance(criteria, dict) else None
+        if date_from and date_to:
+            start_day = date.fromisoformat(date_from)
+            end_day = date.fromisoformat(date_to)
+            # Synology Photos represents taken-time as a timezone-free wall clock
+            # encoded in Unix seconds; construct UTC boundaries for those dates.
+            start_time = datetime.combine(start_day, datetime_time.min, tzinfo=timezone.utc).timestamp()
+            end_time = (
+                datetime.combine(end_day + timedelta(days=1), datetime_time.min, tzinfo=timezone.utc)
+                .timestamp() - 1
+            )
+            request.update(
+                method="list_with_filter",
+                version=min(version, 2),
+                filter=json.dumps(
+                    {"time": [{"start_time": int(start_time), "end_time": int(end_time)}], "item_type": [-1]},
+                    separators=(",", ":"),
+                ),
+            )
+            request.pop("type", None)
         payload = post_synology(
             nas.client,
             url,
-            {
-                "api": api_name,
-                "version": version,
-                "method": "list",
-                "offset": index.source_offset,
-                "limit": MAX_PAGE_SIZE,
-                "type": "photo",
-                "sort_by": "takentime",
-                "sort_direction": "desc",
-                "additional": json.dumps(
-                    ["thumbnail", "resolution", "gps", "address", "tag"],
-                    separators=(",", ":"),
-                ),
-                "_sid": nas.sid,
-            },
+            request,
         )
         data = payload.get("data")
         items = data.get("list") if isinstance(data, dict) else None
@@ -1680,13 +1703,14 @@ def tag_job_detail_payload(db: sqlite3.Connection, owner_key: str, job_id: str) 
 
 def photo_taken_date(photo: dict) -> date | None:
     value = photo.get("time")
-    app_timezone = timezone(timedelta(hours=8))
     try:
         if isinstance(value, (int, float)):
             timestamp = float(value)
             if timestamp > 100_000_000_000:
                 timestamp /= 1000
-            return datetime.fromtimestamp(timestamp, app_timezone).date()
+            # Photos encodes taken-time as a timezone-free wall clock in Unix
+            # seconds. UTC conversion recovers that wall-clock date unchanged.
+            return datetime.fromtimestamp(timestamp, timezone.utc).date()
         if isinstance(value, str) and value.strip():
             text = value.strip()
             try:
@@ -1694,11 +1718,11 @@ def photo_taken_date(photo: dict) -> date | None:
             except ValueError:
                 parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
                 if parsed.tzinfo is None:
-                    parsed = parsed.replace(tzinfo=app_timezone)
-                return parsed.astimezone(app_timezone).date()
+                    return parsed.date()
+                return parsed.astimezone(timezone.utc).date()
             if timestamp > 100_000_000_000:
                 timestamp /= 1000
-            return datetime.fromtimestamp(timestamp, app_timezone).date()
+            return datetime.fromtimestamp(timestamp, timezone.utc).date()
     except (OverflowError, OSError, ValueError):
         return None
     return None
@@ -1736,7 +1760,13 @@ def prepare_tag_job(job_id: str, owner_key: str, nas_token: str, space: str, cri
                 raise SynologyApiError("登入工作階段已失效；請重新登入並安全重跑工作。")
             api_name = "SYNO.Foto.Browse.Item" if space == "personal" else "SYNO.FotoTeam.Browse.Item"
             url, version = api_endpoint(nas, api_name)
-            index = photo_library_index(nas_token, space)
+            has_date_range = bool(criteria.get("date_from") and criteria.get("date_to"))
+            if has_date_range:
+                # A filtered job gets a fresh, private snapshot so it never scans
+                # or mutates the session's general-purpose photo browser index.
+                index = PhotoLibraryIndex(photos=[], last_used=time.monotonic())
+            else:
+                index = photo_library_index(nas_token, space)
             with tag_job_db() as db:
                 processed_ids = photo_tagger_processed_ids(db, owner_key, space) if criteria.get("skip_processed") else set()
             def eligible_matches():
@@ -1746,7 +1776,7 @@ def prepare_tag_job(job_id: str, owner_key: str, nas_token: str, space: str, cri
                 all_matches, matches = eligible_matches()
                 if index.complete or len(matches) > max_candidates:
                     break
-                scan_photo_library_page(nas, api_name, url, version, index)
+                scan_photo_library_page(nas, api_name, url, version, index, criteria)
                 with tag_job_db() as db:
                     db.execute(
                         "UPDATE tag_jobs SET scanned_count=?, updated_at=? WHERE id=? AND owner_key=?",
@@ -1901,7 +1931,10 @@ def run_due_tag_job_schedules() -> None:
         # If the container or NAS was offline past the scheduled day, run only today's batch.
         run_day = max(scheduled_day, now.date())
         criteria = json.loads(schedule["criteria_json"])
-        criteria.update(date_from=run_day.isoformat(), date_to=run_day.isoformat())
+        criteria.update(
+            date_from=(run_day - timedelta(days=1)).isoformat(),
+            date_to=run_day.isoformat(),
+        )
         job_id = uuid.uuid4().hex
         run_at = time.time()
         next_run = daily_schedule_datetime(run_day + timedelta(days=1), schedule["daily_time"]).timestamp()
