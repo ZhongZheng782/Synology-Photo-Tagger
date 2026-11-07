@@ -310,6 +310,8 @@ UC-01 至 UC-04 是目標產品需求。下表列出已部署 v0.4.10 的功能�
 
 ## Docker 版本與部署
 
+v0.4.13 加強容器執行安全：Gunicorn 以非 root UID/GID 執行，照片資料夾保持唯讀掛載，Web 埠預設只綁 NAS loopback；正式部署要求 HTTPS，並將 MLX 與 Tailscale 金鑰改由 host secret 檔唯讀提供。Compose 另限制記憶體與程序數，並移除不需要的 `NET_RAW` capability。舊 SQLite 與排程密文會在啟動時遷移至 `/data/app`，保留既有排程與工作資料。
+
 v0.4.8 已發佈：預設略過有 Photo Tagger AI 描述或 AI 標籤成功寫入紀錄的照片；單純批次更名標籤不計入略過。被略過照片不會進入 AI 分析，也不會寫入描述或其他標籤。
 
 v0.4.9 將照片清單改為「照片庫」，移除登入區的步驟編號，並把 AI 標記與批次更改標籤整合到「建立工作」的工作類型切換器。v0.4.10 加入候選上限 500、800、1000 張選項，以及每天依指定時間執行的定期 AI 標記；排程可在使用者登出後執行，容器重啟後可復原 NAS 登入。排程加密金鑰由 NAS 部署流程建立，唯讀掛載到容器。v0.4.11 將 UX-Deck Lucide squirrel 設為瀏覽器 favicon。v0.4.12 讓每日排程透過 Photos API 日期篩選只查詢執行日與前一日的照片。照片庫篩選只影響目前顯示清單；AI 標記工作仍在建立工作區獨立設定條件。批次更改標籤的進度及完成摘要會同步顯示在「工作結果」。
@@ -322,15 +324,15 @@ v0.4.9 將照片清單改為「照片庫」，移除登入區的步驟編號，�
 
 日本篩選依 `additional.address.country` 回傳值比對；沒有國家地點資料的照片不會列入結果。原圖分析只在使用者逐張點選後執行，不會自動掃描相簿。
 
-1. 複製 `.env.example` 為 `.env`，填入 NAS 的 DSM 根網址、照片目錄路徑、`MLX_SERVER_API_KEY`，以及 Tailscale 管理後台建立的專用 reusable auth key `TAILSCALE_AUTHKEY`。MLX API key 必須與 Mac-mini 部署所用的值相同；兩者都不要提交到 Git。Tailscale 節點狀態會保存在 Docker named volume，容器重建後沿用同一節點身分。MLX 請求透過 `MLX_HTTP_PROXY` 指定的本機 HTTP proxy 連入 Tailnet；Synology Photos API 流量不經 proxy。`MLX_SERVER_URL` 預設為 `http://mac-mini.tail28f10.ts.net:5001`。NAS 的 `SYNOLOGY_URL` 必須使用可由容器連線且 TLS 憑證可驗證的網址；此 NAS 可使用 `https://wenchiehlee.synology.me:7778`。
+1. 複製 `.env.example` 為 `.env`，填入 NAS 的 DSM 根網址、照片目錄路徑，並依設定將 MLX API key 與 Tailscale reusable auth key 放在 host secret 檔（預設位於 `${NAS_DOCKER_ROOT}/mlx-server-api-key` 與 `${NAS_DOCKER_ROOT}/tailscale-authkey`）。金鑰不得放進 `.env` 或提交到 Git。MLX API key 必須與 Mac-mini 部署所用的值相同。Tailscale 節點狀態會保存在 Docker named volume，容器重建後沿用同一節點身分。MLX 請求透過 `MLX_HTTP_PROXY` 指定的本機 HTTP proxy 連入 Tailnet；Synology Photos API 流量不經 proxy。`MLX_SERVER_URL` 預設為 `http://mac-mini.tail28f10.ts.net:5001`。NAS 的 `SYNOLOGY_URL` 必須使用可由容器連線且 TLS 憑證可驗證的網址；此 NAS 可使用 `https://wenchiehlee.synology.me:7778`。
 2. 執行 `docker compose up -d --build`。
-3. 瀏覽 `http://NAS_IP:5056`；可用 `WEB_PORT` 調整對外埠號。
+3. 本機 HTTP 開發可瀏覽 `http://localhost:5056`；NAS 正式部署預設只監聽 `127.0.0.1:5056`，請透過 DSM HTTPS 反向代理存取。部署 workflow 會設定 `APP_HTTPS_ONLY=true`，拒絕經 HTTP 登入。
 4. 按「探索 Photos API」確認模組後，在登入區輸入有 Synology Photos 權限的 NAS 帳號與密碼；有啟用雙重驗證時輸入當次 OTP。然後選擇空間並載入照片清單。
 5. 先選一張照片按「本機 AI 分析」，確認單張建議流程可用。
 6. 若要批次建立購物標籤，套用空間、地點及標籤篩選後，在「AI 標記工作」建立工作並先檢視固定候選快照。
 7. 按「分析尚未完成的照片」後逐張查看縮圖和證據；接受時可選擇現有標籤或「購物」。最後按「寫入已接受項目」才會開始寫入。工作詳情可下載報告、重跑失敗分析或撤銷工作新增的標籤。
 
-直接使用 HTTP 埠時，登入密碼會在瀏覽器與 Web UI 之間傳送；只應在可信任的 LAN 或 SSH tunnel 中使用。需要跨不可信網路存取時，應先透過 DSM 反向代理或其他 TLS 終端提供 HTTPS，再登入。NAS API 端連線會驗證 TLS 憑證，不支援關閉驗證。
+本機開發的 Compose 範例會關閉 HTTPS 強制檢查以供 `localhost` 使用；不要將此設定用於公開網路。正式 NAS 部署只允許經 DSM HTTPS 反向代理登入，並以 loopback 綁定限制直接連線。NAS API 端連線會驗證 TLS 憑證，不支援關閉驗證。
 
 Compose 預設將個人空間 `/volume1/homes/wjlee/Photos` 唯讀掛載至容器的 `/Photos`。AI 分析使用 Photos API，不讀取該掛載路徑。Tailscale 使用 userspace networking 和只綁定容器 loopback 的 HTTP proxy，不需要 `NET_ADMIN`、`NET_RAW` 或 `/dev/net/tun`。`publish-image.yml` 可由 GitHub Actions 手動觸發，將多架構映像發佈至 `wenchiehlee1020/synology-photo-tagger`；需要設定 `DOCKERHUB_USERNAME` 與 `DOCKERHUB_TOKEN` repository secrets。
 

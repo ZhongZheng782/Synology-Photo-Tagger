@@ -1,28 +1,37 @@
 services:
   synology-photo-tagger:
-    image: wenchiehlee1020/synology-photo-tagger:v0.4.12
+    image: wenchiehlee1020/synology-photo-tagger:v0.4.13
     build: .
     container_name: SYNOLOGY-PHOTO-TAGGER
     restart: unless-stopped
+    cap_drop:
+      - NET_RAW
+    mem_limit: ${MEMORY_LIMIT:-1g}
+    pids_limit: 256
     environment:
       PORT: 5000
+      APP_HTTPS_ONLY: ${APP_HTTPS_ONLY:-true}
+      TRUSTED_PROXY_PROTO: ${TRUSTED_PROXY_PROTO:-false}
+      APP_UID: ${APP_UID:-1026}
+      APP_GID: ${APP_GID:-100}
       SYNOLOGY_URL: ${SYNOLOGY_URL:-}
       MLX_SERVER_URL: ${MLX_SERVER_URL:-http://mac-mini.tail28f10.ts.net:5001}
-      MLX_SERVER_API_KEY: ${MLX_SERVER_API_KEY:-}
+      MLX_SERVER_API_KEY_FILE: /run/secrets/mlx-server-api-key
       MLX_MODEL: ${MLX_MODEL:-mlx-gemma4}
       MLX_OCR_ENGINE: ${MLX_OCR_ENGINE:-baidu}
       MLX_TIMEOUT_SECONDS: ${MLX_TIMEOUT_SECONDS:-900}
-      TAILSCALE_AUTHKEY: ${TAILSCALE_AUTHKEY:-}
+      TAILSCALE_AUTHKEY_FILE: /run/secrets/tailscale-authkey
       TAILSCALE_HOSTNAME: ${TAILSCALE_HOSTNAME:-synology-photo-tagger}
       MLX_HTTP_PROXY: ${MLX_HTTP_PROXY:-http://127.0.0.1:1055}
       PHOTO_LIBRARY_PATH: /Photos
-      TAGGER_DB_PATH: /data/photo-tagger.sqlite3
+      TAGGER_DB_PATH: /data/app/photo-tagger.sqlite3
+      NAS_SCHEDULE_CREDENTIALS_PATH: /data/app/nas-schedule-credentials.enc
       DEBUG_SHELL: ${DEBUG_SHELL:-false}
       NAS_SCHEDULE_KEY_FILE: /run/secrets/nas-schedule-key
     extra_hosts:
       - "wenchiehlee.synology.me:192.168.31.101"
     ports:
-      - "${WEB_PORT:-5056}:5000"
+      - "${WEB_BIND_ADDRESS:-127.0.0.1}:${WEB_PORT:-5056}:5000"
       - "127.0.0.1:${DEBUG_SSH_PORT:-2223}:22"
     volumes:
       - ${PHOTO_LIBRARY_PATH:-/volume1/homes/wjlee/Photos}:/Photos:ro
@@ -31,6 +40,8 @@ services:
       - tagger-data:/data
     secrets:
       - nas-schedule-key
+      - mlx-server-api-key
+      - tailscale-authkey
 
 volumes:
   tailscale-state:
@@ -39,3 +50,7 @@ volumes:
 secrets:
   nas-schedule-key:
     file: ${NAS_SCHEDULE_KEY_SOURCE:-./secrets/nas-schedule-key.placeholder}
+  mlx-server-api-key:
+    file: ${MLX_SERVER_API_KEY_SOURCE:-./secrets/mlx-server-api-key.placeholder}
+  tailscale-authkey:
+    file: ${TAILSCALE_AUTHKEY_SOURCE:-./secrets/tailscale-authkey.placeholder}

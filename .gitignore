@@ -7,3 +7,5 @@ __pycache__/
 data/
 /secrets/*
 !/secrets/nas-schedule-key.placeholder
+!/secrets/mlx-server-api-key.placeholder
+!/secrets/tailscale-authkey.placeholder

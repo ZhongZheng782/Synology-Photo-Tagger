@@ -1,4 +1,4 @@
-# Synology Photo Tagger v0.4.12
+# Synology Photo Tagger v0.4.13
 
 A Python web app for browsing Synology Photos, generating photo descriptions and tags, and applying verified updates through the Synology Photos API.
 
@@ -36,20 +36,20 @@ v0.4.8 narrows the default skip rule to photos with a recorded successful AI des
 
 ## Quick start
 
-Create a `.env` file with your NAS URL and local settings, then run:
+Create a `.env` file with your NAS URL and local settings, and place the MLX and Tailscale keys in the host secret files referenced by `.env.example`. Then run:
 
 ```sh
 docker compose up -d
 ```
 
-Open `http://localhost:5056/`. Set `SYNOLOGY_URL` to the DSM address reachable from the container. Sign in through the web UI with a Synology account that can access Photos.
+For local development, open `http://localhost:5056/`. Set `SYNOLOGY_URL` to the DSM address reachable from the container. Sign in through the web UI with a Synology account that can access Photos. Production deployment binds the web port to NAS loopback and requires HTTPS through a reverse proxy.
 
-The provided Compose file uses the versioned `v0.4.12` image tag. Daily schedules query only photos taken today and yesterday through the Synology Photos API date filter instead of scanning the photo library from the newest item. The image includes candidate caps up to 1,000 and recurring daily AI tagging with Synology trusted-device authentication. Photo library filters do not become AI job criteria. Docker Hub retains only tags in the `vX.Y.Z` format; the publishing workflow removes floating (`latest`), commit (`sha-*`), and non-three-part version tags. Set `MLX_SERVER_URL`, `MLX_SERVER_API_KEY`, and a dedicated Tailscale `TAILSCALE_AUTHKEY` in `.env` to enable analysis. `MLX_OCR_ENGINE` selects `baidu` (default) or `glm` for document OCR. Tailscale node state and AI job records plus the session signing key persist in Docker named volumes. For schedules, create the host Fernet key file described in README and set `NAS_DOCKER_ROOT` and `NAS_SCHEDULE_KEY_SOURCE` in `.env` before deployment.
+The provided Compose file uses the versioned `v0.4.13` image tag. Daily schedules query only photos taken today and yesterday through the Synology Photos API date filter instead of scanning the photo library from the newest item. The image includes candidate caps up to 1,000 and recurring daily AI tagging with Synology trusted-device authentication. Photo library filters do not become AI job criteria. Docker Hub retains only tags in the `vX.Y.Z` format; the publishing workflow removes floating (`latest`), commit (`sha-*`), and non-three-part version tags. Set `MLX_SERVER_URL` and keep the MLX/Tailscale credentials in host secret files, not `.env`, to enable analysis. `MLX_OCR_ENGINE` selects `baidu` (default) or `glm` for document OCR. Gunicorn runs as a non-root user, the Photos mount remains read-only, the host web binding defaults to loopback, and Compose applies memory, process, and capability limits. Tailscale node state and AI job records plus the session signing key persist in Docker named volumes. For schedules, create the host Fernet key file described in README and set `NAS_DOCKER_ROOT` and `NAS_SCHEDULE_KEY_SOURCE` in `.env` before deployment.
 
 ## Image
 
 ```sh
-docker pull wenchiehlee1020/synology-photo-tagger:v0.4.12
+docker pull wenchiehlee1020/synology-photo-tagger:v0.4.13
 ```
 
 Source: [GitHub](https://github.com/ZhongZheng782/Synology-Photo-Tagger)

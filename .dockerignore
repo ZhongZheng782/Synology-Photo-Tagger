@@ -3,7 +3,12 @@
 .venv
 __pycache__
 *.py[cod]
-.env
+.env*
+!.env.example
 data
 secrets
+**/sshd_config
+**/authorized_keys
+*.pem
+*.key
 debug/authorized_keys

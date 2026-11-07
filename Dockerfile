@@ -1,12 +1,12 @@
 FROM python:3.11-slim
 
-ARG APP_VERSION=v0.4.12
+ARG APP_VERSION=v0.4.13
 LABEL org.opencontainers.image.title="Synology Photo Tagger" \
       org.opencontainers.image.version="${APP_VERSION}" \
       org.opencontainers.image.description="Synology Photos AI tagging with scheduled work, trusted-device login, and automatic verified writes."
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends bash ca-certificates curl openssh-server \
+    && apt-get install -y --no-install-recommends bash ca-certificates curl openssh-server util-linux \
     && curl -fsSL https://tailscale.com/install.sh | sh \
     && rm -rf /var/lib/apt/lists/*
 

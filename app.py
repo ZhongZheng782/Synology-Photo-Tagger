@@ -21,15 +21,21 @@ from cryptography.fernet import Fernet, InvalidToken
 
 import requests
 from flask import Flask, Response, copy_current_request_context, jsonify, render_template, request, session
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("APP_SECRET_KEY") or secrets.token_hex(32)
+APP_HTTPS_ONLY = os.environ.get("APP_HTTPS_ONLY", "false").lower() == "true"
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Strict",
-    SESSION_COOKIE_SECURE=os.environ.get("APP_HTTPS_ONLY", "false").lower() == "true",
+    SESSION_COOKIE_SECURE=APP_HTTPS_ONLY,
     PERMANENT_SESSION_LIFETIME=timedelta(hours=12),
 )
+if os.environ.get("TRUSTED_PROXY_PROTO", "false").lower() == "true":
+    # Production binds the app port to NAS loopback; only the local DSM reverse
+    # proxy can reach it and supply X-Forwarded-Proto.
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1)
 
 API_INFO_PARAMS = {
     "api": "SYNO.API.Info",
@@ -41,7 +47,7 @@ API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 NAS_SESSION_TTL_SECONDS = 12 * 60 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.4.12")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.4.13")
 TAGGER_DB_PATH = os.environ.get(
     "TAGGER_DB_PATH", os.path.join(os.path.dirname(__file__), "data", "photo-tagger.sqlite3")
 )
@@ -49,7 +55,22 @@ MLX_SERVER_URL = os.environ.get(
     "MLX_SERVER_URL", "http://mac-mini.tail28f10.ts.net:5001"
 ).strip().rstrip("/")
 MLX_HTTP_PROXY = os.environ.get("MLX_HTTP_PROXY", "").strip()
-MLX_SERVER_API_KEY = os.environ.get("MLX_SERVER_API_KEY", "").strip()
+
+
+def read_secret_file(path_text: str) -> str:
+    if not path_text:
+        return ""
+    try:
+        return Path(path_text).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+MLX_SERVER_API_KEY = (
+    os.environ.get("MLX_SERVER_API_KEY", "").strip()
+    or read_secret_file(os.environ.get("MLX_SERVER_API_KEY_FILE", ""))
+    or os.environ.get("MLX_SERVER_API_KEY_LEGACY", "").strip()
+)
 MLX_MODEL = os.environ.get("MLX_MODEL", "mlx-gemma4").strip() or "mlx-gemma4"
 MLX_OCR_ENGINE = os.environ.get("MLX_OCR_ENGINE", "baidu").strip().lower() or "baidu"
 MLX_TIMEOUT_SECONDS = max(30, int(os.environ.get("MLX_TIMEOUT_SECONDS", "900")))
@@ -323,7 +344,9 @@ def post_synology(client: requests.Session, url: str, data: dict) -> dict:
 
 def schedule_credential_cipher() -> Fernet | None:
     try:
-        key = Path(NAS_SCHEDULE_KEY_FILE).read_bytes().strip()
+        key = os.environ.get("NAS_SCHEDULE_KEY", "").encode("utf-8").strip()
+        if not key:
+            key = Path(NAS_SCHEDULE_KEY_FILE).read_bytes().strip()
         return Fernet(key) if key else None
     except (OSError, ValueError):
         return None
@@ -911,6 +934,11 @@ def session_status():
 
 @app.post("/api/login")
 def login():
+    if APP_HTTPS_ONLY and not request.is_secure:
+        return jsonify({
+            "ok": False,
+            "error": "登入資料只會透過 HTTPS 傳送；請改用 HTTPS 網址。",
+        }), 400
     body = request.get_json(silent=True) or {}
     username = str(body.get("username", "")).strip()
     password = str(body.get("password", ""))
