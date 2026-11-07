@@ -1,5 +1,9 @@
 # Synology Photo Tagger
 
+[![Docker Pulls](https://img.shields.io/docker/pulls/wenchiehlee1020/synology-photo-tagger?style=flat-square)](https://hub.docker.com/r/wenchiehlee1020/synology-photo-tagger)
+[![Docker Image Version](https://img.shields.io/docker/v/wenchiehlee1020/synology-photo-tagger?sort=semver&style=flat-square)](https://hub.docker.com/r/wenchiehlee1020/synology-photo-tagger)
+[![Docker Image Size](https://img.shields.io/docker/image-size/wenchiehlee1020/synology-photo-tagger/latest?style=flat-square)](https://hub.docker.com/r/wenchiehlee1020/synology-photo-tagger)
+
 > 以 AI 描述與標籤，讓 Synology Photos 照片更容易搜尋。
 
 ## 目標
