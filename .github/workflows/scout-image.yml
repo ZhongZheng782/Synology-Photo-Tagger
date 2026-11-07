@@ -1,0 +1,62 @@
+name: Docker Scout Image Audit
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Image tag to scan
+        required: true
+        default: v0.4.13
+        type: string
+      compare_tag:
+        description: Older image tag to compare against
+        required: true
+        default: v0.4.12
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  scout:
+    name: ${{ matrix.platform }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux/amd64, linux/arm64]
+    steps:
+      - name: Scan all CVEs
+        uses: docker/scout-action@4bbf17a9da65a7b5497361bb407e88cc9548f69c # v1
+        with:
+          command: cves
+          image: wenchiehlee1020/synology-photo-tagger:${{ inputs.image_tag }}
+          platform: ${{ matrix.platform }}
+          dockerhub-user: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+          summary: true
+
+      - name: Report fixable critical and high CVEs
+        uses: docker/scout-action@4bbf17a9da65a7b5497361bb407e88cc9548f69c # v1
+        with:
+          command: cves
+          image: wenchiehlee1020/synology-photo-tagger:${{ inputs.image_tag }}
+          platform: ${{ matrix.platform }}
+          dockerhub-user: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+          only-severities: critical,high
+          only-fixed: true
+          summary: true
+
+      - name: Compare with previous image
+        uses: docker/scout-action@4bbf17a9da65a7b5497361bb407e88cc9548f69c # v1
+        with:
+          command: compare
+          image: wenchiehlee1020/synology-photo-tagger:${{ inputs.image_tag }}
+          to: wenchiehlee1020/synology-photo-tagger:${{ inputs.compare_tag }}
+          platform: ${{ matrix.platform }}
+          dockerhub-user: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+          ignore-unchanged: true
+          only-severities: critical,high
+          summary: true

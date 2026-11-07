@@ -1,10 +1,9 @@
 ---
 name: skill-docker-security-coach
-version: 1.0.0
-description: Coach Docker and Node.js container security audits, hardening recipes, and vulnerability assessments in Traditional Chinese. Use for evaluating Dockerfile practices, container privilege boundaries, npm dependency supply chains, secrets isolation, and producing structured audit reports.
+description: Coach Docker and Node.js container security audits, Docker Scout CVE checklists, hardening recipes, and vulnerability remediation in Traditional Chinese. Use for reviewing image and base OS vulnerabilities, dependencies, container privilege boundaries, supply chains, and secrets handling.
 ---
 
-# Docker 容器安全教練 (v1.0.0)
+# Docker 容器安全教練 (v1.1.0)
 
 以結構化查核清單、威脅模型分析與可驗證修復建議，協助評估與加固 Docker 容器及 Node.js 執行環境之安全性。預設繁體中文（zh-TW），優先指出關鍵弱點與修復配方，再提供詳細技術原理解析。
 
@@ -76,6 +75,47 @@ Layer 5: Secrets & Observability (Environment Variables & Log Masking)
 - [ ] **禁止在 Dockerfile / Compose 硬編碼機密**：API Key、密碼與 Auth Token 一律以 `.env`、Docker Secrets 或 GitHub Secrets 注入。
 - [ ] **日誌脫敏 (Token Masking)**：容器輸出日誌時，需過濾並遮蔽包含 `API_KEY`、`AUTHKEY`、Bearer Token 等關鍵欄位。
 - [ ] **排除非必要檔案**：透過 `.dockerignore` 排除 `.env`、`.git`、`node_modules` 與金鑰快取目錄。
+
+### 6. 映像檔 CVE 清單 (Docker Scout)
+
+對正式映像檔及候選版本執行 Docker Scout。先看完整報告，再聚焦可修補的 Critical/High；不可只看總分或只檢查最新 tag。把每筆發現記錄到報告，直到修補後的新映像重新掃描完成。
+
+```bash
+# 完整 CVE 清單，保留 Scout 的套件、版本、嚴重度、修補版本與映像資訊
+docker scout cves --format markdown IMAGE:TAG
+
+# 先處理可修補的 Critical / High
+docker scout cves --only-fixed --only-severity critical,high IMAGE:TAG
+
+# 區分 base image 與應用程式層的套件
+docker scout cves --only-base IMAGE:TAG
+docker scout cves --ignore-base IMAGE:TAG
+
+# 將新舊映像比較，檢查修補後新增或消失的弱點
+docker scout compare IMAGE:NEW_TAG --to IMAGE:OLD_TAG --ignore-unchanged
+```
+
+對多架構映像，至少分別掃描部署會使用的每個平台（例如 `--platform linux/amd64` 與 `--platform linux/arm64`），並記下掃描的 tag、digest、平台及日期。也要掃描所有仍在部署或可被拉取使用的版本 tag；舊 tag 不會因為新 tag 修好了就自動消失。
+
+每筆 CVE 至少記錄：
+
+| 欄位 | 要記錄的內容 |
+|---|---|
+| 嚴重度與 CVE | Scout 顯示的 severity、CVE/GHSA、CVSS（若有） |
+| 套件 | 名稱、ecosystem/type、偵測版本、套件位於哪一層或檔案路徑 |
+| 影響範圍 | 受影響映像 tag/digest、平台、base image 或應用程式相依 |
+| 修補資訊 | 是否有修補、受影響版本範圍、上游固定版本 |
+| 處理結果 | 升級來源與版本、複掃結果；或暫緩理由、緩解措施、責任人與下次檢查日期 |
+
+處理規則：
+
+- **有修補版本**：先判斷套件來自應用相依、OS 套件、base image 或隨附的第三方二進位檔，再升級正確來源；重建映像並複掃，不以改版號或隱藏 Scout 結果當成修補。
+- **沒有修補版本**：保留為開放項目；查閱套件維護者、作業系統安全公告及 CVE 範圍，記錄是否存在可驗證的 backport、受影響功能是否可達，以及暫行緩解和重查日期。不要只因程式目前未呼叫套件就標成不受影響。
+- **多映像結果**：確認每個受影響 tag 是否仍部署；若保留舊版供回復，列入清單並說明舊版弱點仍存在。
+- **VEX 或例外**：只在有可核對的依賴路徑、程式碼路徑或供應商聲明時使用；說明證據與適用的 image digest。例外不會移除套件或修補漏洞。
+- **驗收**：新映像的 fixable Critical/High 已消失，或逐項有明確、可追蹤的例外處理；`docker scout compare` 確認套件變更符合預期。未修補的 unfixed CVE 仍需出現在報告中。
+
+Docker Scout 指令與欄位以官方文件為準：[docker scout cves](https://docs.docker.com/reference/cli/docker/scout/cves/)、[Docker Scout image analysis](https://docs.docker.com/scout/explore/analysis/)、[Docker Scout exceptions](https://docs.docker.com/scout/explore/exceptions/)。
 
 ---
 

@@ -1,8 +1,8 @@
 {
   "name": "skill-docker-security-coach",
-  "description": "Coach Docker and Node.js container security audits, hardening recipes, and vulnerability assessments in Traditional Chinese. Use for evaluating Dockerfile practices, container privilege boundaries, npm dependency supply chains, secrets isolation, and producing structured audit reports.",
+  "description": "Coach Docker and Node.js container security audits, Docker Scout CVE checklists, hardening recipes, and vulnerability remediation in Traditional Chinese. Use for reviewing image/base OS and dependency vulnerabilities, container privilege boundaries, npm supply chains, and secrets handling.",
   "category": "devops-security",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "wenchiehlee",
   "maintainer": "wenchiehlee",
   "source": "https://github.com/ZhongZheng782/Llm-Cli-APIServer",
@@ -16,7 +16,9 @@
     "hardening",
     "least-privilege",
     "audit-report",
-    "container-security"
+    "container-security",
+    "docker-scout",
+    "cve-remediation"
   ],
   "files": [
     "metadata.json",
