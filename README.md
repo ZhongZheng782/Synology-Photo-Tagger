@@ -314,7 +314,7 @@ UC-01 至 UC-04 是目標產品需求。下表列出已部署 v0.4.10 的功能�
 
 ## Docker 版本與部署
 
-v0.4.15 修補 Docker Scout 標示可修補的高風險相依套件：升級 `cryptography`、`jaraco-context`、`setuptools`、`wheel`，並以官方 Tailscale v1.104.5 原始碼建置 `tailscale`／`tailscaled`，將 `klauspost/compress` 與 `golang.org/x/net` 固定至已修補版。v0.4.14 的初次掃描發現 Python 基底所含 setuptools vendored 副本仍帶有舊版 wheel 與 jaraco-context，因此不部署 v0.4.14；v0.4.15 的 Scout 雙架構複掃待發佈後確認。
+v0.4.15 修補 Docker Scout 標示可修補的高風險相依套件：升級 `cryptography`、`jaraco-context`、`setuptools`、`wheel`，並以官方 Tailscale v1.104.5 原始碼建置 `tailscale`／`tailscaled`，將 `klauspost/compress` 與 `golang.org/x/net` 固定至已修補版。v0.4.14 因 setuptools vendored 副本仍帶有舊版 wheel 與 jaraco-context 而未部署。Scout 於 2026-11-07 對 amd64／arm64 複掃確認可修補 Critical／High 為 0；每個架構仍有 4 項未修補 High（zlib：CVE-2026-76844、CVE-2026-85091；u-root：CVE-2020-7665、CVE-2020-7669）、7 Medium、41 Low 與 1 unknown。
 
 v0.4.13 加強容器執行安全：Gunicorn 以非 root UID/GID 執行，照片資料夾保持唯讀掛載，Web 埠預設只綁 NAS loopback；正式部署要求 HTTPS，並將 MLX 與 Tailscale 金鑰改由 host secret 檔唯讀提供。Compose 另限制記憶體與程序數，並移除不需要的 `NET_RAW` capability。舊 SQLite 與排程密文會在啟動時遷移至 `/data/app`，保留既有排程與工作資料。
 
