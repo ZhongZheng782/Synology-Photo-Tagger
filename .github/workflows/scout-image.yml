@@ -40,16 +40,21 @@ jobs:
           docker run --rm --platform linux/amd64 --entrypoint python "$IMAGE" -c '
           import importlib.metadata as metadata
           from pathlib import Path
+          import re
           names = {"jaraco-context", "wheel"}
           for dist in metadata.distributions():
-              name = (dist.metadata.get("Name") or "").lower().replace("_", "-")
+              name = re.sub(r"[-_.]+", "-", (dist.metadata.get("Name") or "").lower())
               if name in names:
                   print("{}=={} at {}".format(name, dist.version, dist._path))
-          for root in (Path("/usr/local/lib/python3.11/site-packages"), Path("/usr/lib/python3/dist-packages")):
+          for root in (Path("/usr/local/lib"), Path("/usr/lib")):
               if root.exists():
-                  for path in sorted(root.glob("*")):
-                      if path.name.lower().replace("_", "-").startswith(("wheel", "jaraco")):
-                          print(f"PATH {path}")
+                  for path in sorted(root.rglob("*.dist-info/METADATA")):
+                      try:
+                          text = path.read_text(errors="ignore")
+                      except OSError:
+                          continue
+                      if any(key in text.lower() for key in ("name: wheel", "name: jaraco-context", "name: jaraco.context")):
+                          print(f"METADATA {path}: " + " | ".join(line for line in text.splitlines()[:3]))
           '
 
       - name: Scan all CVEs
