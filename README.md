@@ -314,6 +314,8 @@ UC-01 至 UC-04 是目標產品需求。下表列出已部署 v0.4.10 的功能�
 
 ## Docker 版本與部署
 
+v0.4.14 修補 Docker Scout 標示可修補的 Python 與 Tailscale Go 相依套件弱點：升級 `cryptography`、`jaraco-context`、`wheel`，並以官方 Tailscale v1.104.5 原始碼建置 `tailscale`／`tailscaled`，將 `klauspost/compress` 與 `golang.org/x/net` 固定至已修補版。Scout 的雙架構掃描結果仍待映像發佈後確認。
+
 v0.4.13 加強容器執行安全：Gunicorn 以非 root UID/GID 執行，照片資料夾保持唯讀掛載，Web 埠預設只綁 NAS loopback；正式部署要求 HTTPS，並將 MLX 與 Tailscale 金鑰改由 host secret 檔唯讀提供。Compose 另限制記憶體與程序數，並移除不需要的 `NET_RAW` capability。舊 SQLite 與排程密文會在啟動時遷移至 `/data/app`，保留既有排程與工作資料。
 
 v0.4.8 已發佈：預設略過有 Photo Tagger AI 描述或 AI 標籤成功寫入紀錄的照片；單純批次更名標籤不計入略過。被略過照片不會進入 AI 分析，也不會寫入描述或其他標籤。
