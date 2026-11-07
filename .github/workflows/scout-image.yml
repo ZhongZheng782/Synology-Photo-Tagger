@@ -26,6 +26,32 @@ jobs:
       matrix:
         platform: [linux/amd64, linux/arm64]
     steps:
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Inspect runtime Python package copies
+        if: matrix.platform == 'linux/amd64'
+        run: |
+          IMAGE="wenchiehlee1020/synology-photo-tagger:${{ inputs.image_tag }}"
+          docker pull --platform linux/amd64 "$IMAGE"
+          docker run --rm --platform linux/amd64 --entrypoint python "$IMAGE" -c '
+          import importlib.metadata as metadata
+          from pathlib import Path
+          names = {"jaraco-context", "wheel"}
+          for dist in metadata.distributions():
+              name = (dist.metadata.get("Name") or "").lower().replace("_", "-")
+              if name in names:
+                  print("{}=={} at {}".format(name, dist.version, dist._path))
+          for root in (Path("/usr/local/lib/python3.11/site-packages"), Path("/usr/lib/python3/dist-packages")):
+              if root.exists():
+                  for path in sorted(root.glob("*")):
+                      if path.name.lower().replace("_", "-").startswith(("wheel", "jaraco")):
+                          print(f"PATH {path}")
+          '
+
       - name: Scan all CVEs
         uses: docker/scout-action@4bbf17a9da65a7b5497361bb407e88cc9548f69c # v1
         with:
