@@ -1,0 +1,124 @@
+name: Diagnose Synology Photos date filter
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: [self-hosted, linux, x64, ubuntu-latest]
+    timeout-minutes: 5
+    steps:
+      - name: Read-only Photos API date-filter probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker exec -i SYNOLOGY-PHOTO-TAGGER python3 - <<'PY'
+          import json
+          from datetime import date, datetime, time, timedelta, timezone
+          import app
+
+          credentials = app.encrypted_schedule_credentials()
+          if not credentials:
+              raise SystemExit("Trusted NAS credentials are unavailable in the app container.")
+          base_url = credentials.get("base_url")
+          username = credentials.get("username")
+          password = credentials.get("password")
+          device_id = credentials.get("device_id")
+          if not all(isinstance(value, str) and value for value in (base_url, username, password, device_id)):
+              raise SystemExit("Trusted NAS credentials are incomplete.")
+
+          client = None
+          sid = None
+          prefix = None
+          catalog = None
+          try:
+              client, prefix, catalog, sid, _ = app.login_to_synology(
+                  base_url, username, password, device_id=device_id
+              )
+              api_name = "SYNO.Foto.Browse.Item"
+              nas = app.NasSession(client, sid, prefix, catalog, 0)
+              endpoint, api_max = app.api_endpoint(nas, api_name)
+              start_day, end_day = date(2024, 1, 8), date(2024, 12, 31)
+              start_time = int(datetime.combine(start_day, time.min, timezone.utc).timestamp())
+              end_time = int(
+                  datetime.combine(end_day + timedelta(days=1), time.min, timezone.utc).timestamp() - 1
+              )
+              filter_text = json.dumps(
+                  {"time": [{"start_time": start_time, "end_time": end_time}], "item_type": [-1]},
+                  separators=(",", ":"),
+              )
+              version = min(api_max, 2)
+              base = {
+                  "api": api_name,
+                  "version": version,
+                  "offset": 0,
+                  "limit": 100,
+                  "filter": filter_text,
+                  "_sid": sid,
+              }
+              print(f"module_max_version={api_max} request_version={version}")
+              count_result = app.post_synology(
+                  client, endpoint, {**base, "method": "count_with_filter"}
+              )
+              count_data = count_result.get("data") if isinstance(count_result.get("data"), dict) else {}
+              safe_count = {
+                  key: value for key, value in count_data.items()
+                  if key in {"count", "total", "total_count"} and isinstance(value, (int, float))
+              }
+              print("filtered_count=" + json.dumps(safe_count, ensure_ascii=True))
+
+              returned = 0
+              outside_range = 0
+              found_target = False
+              target_date = None
+              dates = []
+              pages = 0
+              for page in range(40):
+                  result = app.post_synology(
+                      client, endpoint,
+                      {**base, "method": "list_with_filter", "offset": page * 100},
+                  )
+                  data = result.get("data") if isinstance(result.get("data"), dict) else {}
+                  rows = data.get("list") if isinstance(data.get("list"), list) else []
+                  pages += 1
+                  returned += len(rows)
+                  for item in rows:
+                      if not isinstance(item, dict):
+                          continue
+                      taken = app.photo_taken_date(item)
+                      if taken:
+                          dates.append(taken.isoformat())
+                          if not (start_day <= taken <= end_day):
+                              outside_range += 1
+                      if str(item.get("filename", "")).casefold() == "img_2500.jpg":
+                          found_target = True
+                          target_date = taken.isoformat() if taken else "unavailable"
+                  if len(rows) < 100:
+                      break
+              print(f"list_pages={pages} returned_items={returned}")
+              print(f"returned_taken_date_min={min(dates) if dates else 'unavailable'}")
+              print(f"returned_taken_date_max={max(dates) if dates else 'unavailable'}")
+              print(f"returned_items_outside_requested_range={outside_range}")
+              print(f"IMG_2500.JPG_found={found_target} target_taken_date={target_date or 'not_returned'}")
+          except Exception as error:
+              print(f"probe_error_type={type(error).__name__}")
+              if isinstance(error, app.SynologyApiError):
+                  print(f"probe_error_code={error.code}")
+                  print(f"probe_error_message={str(error)[:200]}")
+              raise
+          finally:
+              if client and sid:
+                  try:
+                      nas = app.NasSession(client, sid, prefix, catalog, 0)
+                      auth_endpoint, auth_version = app.api_endpoint(nas, "SYNO.API.Auth")
+                      app.post_synology(client, auth_endpoint, {
+                          "api": "SYNO.API.Auth", "version": auth_version, "method": "logout",
+                          "session": "SynologyPhotoTagger", "_sid": sid,
+                      })
+                  except Exception:
+                      pass
+                  client.close()
+          PY
