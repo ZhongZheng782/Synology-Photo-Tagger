@@ -46,12 +46,12 @@ jobs:
               end_time = int(
                   datetime.combine(end_day + timedelta(days=1), time.min, timezone.utc).timestamp() - 1
               )
-          # Photos expects each filter as a top-level JSON-encoded form field;
-          # an unknown `filter` field is silently ignored by DSM.
-          filter_params = {
-              "time": json.dumps([{"start_time": start_time, "end_time": end_time}], separators=(",", ":")),
-              "item_type": json.dumps([-1], separators=(",", ":")),
-          }
+              # Photos expects each filter as a top-level JSON-encoded form field;
+              # an unknown `filter` field is silently ignored by DSM.
+              filter_params = {
+                  "time": json.dumps([{"start_time": start_time, "end_time": end_time}], separators=(",", ":")),
+                  "item_type": json.dumps([-1], separators=(",", ":")),
+              }
               version = min(api_max, 2)
               base = {
                   "api": api_name,
@@ -62,7 +62,7 @@ jobs:
               }
               print(f"module_max_version={api_max} request_version={version}")
               count_result = app.post_synology(
-              client, endpoint, {**base, **filter_params, "method": "count_with_filter"}
+                  client, endpoint, {**base, **filter_params, "method": "count_with_filter"}
               )
               count_data = count_result.get("data") if isinstance(count_result.get("data"), dict) else {}
               safe_count = {
