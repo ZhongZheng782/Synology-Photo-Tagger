@@ -47,7 +47,7 @@ API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 NAS_SESSION_TTL_SECONDS = 12 * 60 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.4.15")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.4.16")
 TAGGER_DB_PATH = os.environ.get(
     "TAGGER_DB_PATH", os.path.join(os.path.dirname(__file__), "data", "photo-tagger.sqlite3")
 )
@@ -798,10 +798,11 @@ def scan_photo_library_page(
             request.update(
                 method="list_with_filter",
                 version=min(version, 2),
-                filter=json.dumps(
-                    {"time": [{"start_time": int(start_time), "end_time": int(end_time)}], "item_type": [-1]},
+                time=json.dumps(
+                    [{"start_time": int(start_time), "end_time": int(end_time)}],
                     separators=(",", ":"),
                 ),
+                item_type=json.dumps([-1], separators=(",", ":")),
             )
             request.pop("type", None)
         payload = post_synology(

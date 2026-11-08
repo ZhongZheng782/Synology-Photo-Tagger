@@ -22,7 +22,7 @@ RUN go get github.com/klauspost/compress@v1.20.2 golang.org/x/net@v0.62.0 \
 
 FROM python:3.11-slim
 
-ARG APP_VERSION=v0.4.15
+ARG APP_VERSION=v0.4.16
 LABEL org.opencontainers.image.title="Synology Photo Tagger" \
       org.opencontainers.image.version="${APP_VERSION}" \
       org.opencontainers.image.description="Synology Photos AI tagging with scheduled work, trusted-device login, and automatic verified writes."

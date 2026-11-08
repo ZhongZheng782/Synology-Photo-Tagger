@@ -6,12 +6,12 @@ on:
       image_tag:
         description: Image tag to scan
         required: true
-        default: v0.4.15
+        default: v0.4.16
         type: string
       compare_tag:
         description: Older image tag to compare against
         required: true
-        default: v0.4.14
+        default: v0.4.15
         type: string
 
 permissions:
