@@ -49,7 +49,7 @@ API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 NAS_SESSION_TTL_SECONDS = 12 * 60 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.4.18")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.4.19")
 TAGGER_DB_PATH = os.environ.get(
     "TAGGER_DB_PATH", os.path.join(os.path.dirname(__file__), "data", "photo-tagger.sqlite3")
 )
@@ -808,7 +808,7 @@ def nearby_shop_candidates(latitude: float, longitude: float, cache_scope: str) 
                 "limit": 8,
                 "lang": "en",
             },
-            headers={"User-Agent": "Synology-Photo-Tagger/0.4.18"},
+            headers={"User-Agent": "Synology-Photo-Tagger/0.4.19"},
             timeout=(4, 15),
         )
     response.raise_for_status()

@@ -1403,6 +1403,83 @@
             : `${item.write.description_skipped_existing ? '原有描述已保留；' : ''}${item.write.tags_added?.length ? `已新增：${item.write.tags_added.join('、')}` : '標籤已存在'}；Photos API 讀回核對完成。`;
           content.append(written);
         }
+        if (
+          item.write?.ok && !item.write.dry_run &&
+          (item.analysis?.tags || []).includes('產品')
+        ) {
+          const nearbyDetails = document.createElement('details');
+          nearbyDetails.className = 'job-nearby-details';
+          const nearbySummary = document.createElement('summary');
+          nearbySummary.textContent = '查看拍攝地點附近店家';
+          const nearbySection = document.createElement('section');
+          nearbySection.className = 'nearby-stores';
+          const notice = document.createElement('p');
+          notice.textContent = '僅列 GPS 附近的地圖店家，不代表購買店家。展開後座標會傳送至 Photon／OpenStreetMap。';
+          const status = document.createElement('p');
+          status.className = 'nearby-store-status';
+          const storeList = document.createElement('ul');
+          storeList.className = 'nearby-store-list';
+          nearbySection.append(notice, status, storeList);
+          nearbyDetails.append(nearbySummary, nearbySection);
+          let nearbyLoaded = false;
+          nearbyDetails.addEventListener('toggle', async () => {
+            if (!nearbyDetails.open || nearbyLoaded) return;
+            nearbyLoaded = true;
+            status.textContent = '正在查詢附近店家…';
+            try {
+              const params = new URLSearchParams({space: job.space});
+              const response = await fetch(`/api/photos/${encodeURIComponent(photo.id)}/nearby-stores?${params}`);
+              const result = await response.json().catch(() => null);
+              if (!result) throw new Error('附近店家服務回傳了無法讀取的回應。');
+              if (!result.ok) throw new Error(result.error || '附近店家查詢失敗。');
+              if (result.status === 'no_gps') {
+                status.textContent = '這張照片沒有 GPS 資訊。';
+              } else if (result.status === 'no_results') {
+                status.textContent = '地圖資料中沒有找到附近商店。';
+              } else {
+                status.textContent = '';
+                for (const store of result.stores || []) {
+                  const row = document.createElement('li');
+                  const name = document.createElement('strong');
+                  const translated = store.name_zh_tw || store.name || '未命名店家';
+                  name.textContent = translated !== store.name ? `${translated}（${store.name}）` : translated;
+                  const meta = document.createElement('span');
+                  meta.textContent = `${(store.categories || []).join('、')} · 約 ${store.distance_m} 公尺`;
+                  row.append(name, meta);
+                  if (store.osm_url) {
+                    const link = document.createElement('a');
+                    link.href = store.osm_url;
+                    link.target = '_blank';
+                    link.rel = 'noopener noreferrer';
+                    link.textContent = '地圖資料';
+                    row.append(link);
+                  }
+                  storeList.append(row);
+                }
+              }
+              const attribution = document.createElement('a');
+              attribution.href = result.attribution_url || 'https://www.openstreetmap.org/copyright';
+              attribution.target = '_blank';
+              attribution.rel = 'noopener noreferrer';
+              attribution.className = 'nearby-attribution';
+              attribution.textContent = result.attribution || '© OpenStreetMap contributors';
+              nearbySection.append(attribution);
+              if (result.map_url) {
+                const mapLink = document.createElement('a');
+                mapLink.href = result.map_url;
+                mapLink.target = '_blank';
+                mapLink.rel = 'noopener noreferrer';
+                mapLink.className = 'nearby-attribution';
+                mapLink.textContent = '查看拍攝座標';
+                nearbySection.append(mapLink);
+              }
+            } catch (error) {
+              nearbyLoaded = false;
+              status.textContent = error.message || '無法取得附近店家。';
+            }
+          });
+          content.append(nearbyDetails);
+        }
         if (item.undo_status === 'undone') {
           const undone = document.createElement('p');
           undone.className = 'tag-job-result';
