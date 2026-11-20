@@ -65,7 +65,7 @@
             <span class="login-indicator"><i></i>NAS 工作階段已連線</span>
             <button class="secondary-button" id="logout-button" type="button">登出</button>
           </div>
-          <div class="security-hint"><strong>連線提醒</strong><span>瀏覽器到此 Web UI 使用 HTTP。請只在可信任的區域網路或 SSH tunnel 中輸入 NAS 密碼；瀏覽器到 NAS API 的連線使用已驗證的 HTTPS。</span></div>
+          {% if show_connection_warning %}<div class="security-hint"><strong>連線提醒</strong><span>瀏覽器到 Photo Tagger 使用未加密的 HTTP；請只透過可信任的區域網路或 SSH tunnel 登入。正式部署的 Photo Tagger 伺服器會以 HTTPS 連線至 NAS API，並驗證 TLS 憑證。</span></div>{% endif %}
           <div class="result-box" id="auth-result" hidden aria-live="polite"></div>
         </article>
         <aside class="mini-panel privacy-panel browse-note"><div class="privacy-heading"><span>◈</span><strong>照片瀏覽與單張操作</strong></div><p>此處的地點與標籤只篩選畫面清單。單張 AI 分析可從照片卡片啟動；批次 AI 標記與批次標籤更名請至「建立工作」。</p><div class="privacy-foot"><span></span>每頁最多 100 張</div></aside>

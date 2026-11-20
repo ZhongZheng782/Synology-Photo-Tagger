@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.metadata
 import hashlib
+import ipaddress
 import io
 import json
 import os
@@ -47,7 +48,7 @@ API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 NAS_SESSION_TTL_SECONDS = 12 * 60 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.4.16")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.4.17")
 TAGGER_DB_PATH = os.environ.get(
     "TAGGER_DB_PATH", os.path.join(os.path.dirname(__file__), "data", "photo-tagger.sqlite3")
 )
@@ -830,6 +831,8 @@ def validate_base_url(base_url: str) -> str | None:
     parsed = urlsplit(base_url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         return "NAS 位址格式錯誤，請使用 http(s)://主機名稱或 IP[:埠號]。"
+    if APP_HTTPS_ONLY and parsed.scheme != "https":
+        return "正式部署的 NAS 位址必須使用 HTTPS；服務會驗證 NAS TLS 憑證。"
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
         return "NAS 位址不可包含帳密、查詢參數或網址片段。"
     if parsed.path not in {"", "/"}:
@@ -844,6 +847,18 @@ def sdk_version() -> str:
         return "未安裝"
 
 
+def should_show_connection_warning() -> bool:
+    if request.is_secure:
+        return False
+    hostname = (urlsplit(request.host_url).hostname or "").lower()
+    if hostname == "localhost":
+        return False
+    try:
+        return not ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return True
+
+
 @app.get("/")
 def index():
     return render_template(
@@ -851,6 +866,7 @@ def index():
         base_url=configured_base_url(),
         sdk_version=sdk_version(),
         app_version=APP_VERSION,
+        show_connection_warning=should_show_connection_warning(),
         library_mounted=os.path.isdir("/Photos"),
         logged_in=current_nas_session() is not None,
     )
