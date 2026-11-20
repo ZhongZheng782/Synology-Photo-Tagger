@@ -296,23 +296,28 @@ v0.4.12 將每日排程的查詢範圍設為執行日與前一日，並使用 Ph
 
 - [eleonne/synology-tagger](https://github.com/eleonne/synology-tagger)：以機器學習擴充 Synology Photos 搜尋的開源實作。它將分類結果寫入 Synology Photos 的 `general_tag` 與 `many_unit_has_many_general_tag` 資料表；本專案僅將其作為設計參考，仍採 metadata-first 策略，不直接寫入 Synology Photos 內部資料庫。
 - [zeichensatz/SynologyPhotosAPI](https://github.com/zeichensatz/SynologyPhotosAPI)：Synology Photos API 的非官方探索文件，供 API 探測與整合設計參考；內容尚不完整，實際支援的 API 與參數仍須在目標 NAS 上驗證。
+- [Photon](https://github.com/komoot/photon)：以 OpenStreetMap 資料提供反向地理查詢；Photo Tagger 僅在使用者查看帶有「產品」標籤的單張照片時查詢附近商店，並顯示 [OpenStreetMap attribution](https://www.openstreetmap.org/copyright)。
 
 ## 目前 AI 標記工作範圍
 
-UC-01 至 UC-04 是目標產品需求。下表列出已部署 v0.4.17 的功能狀態及尚待驗證項目：
+v0.4.18 另提供單張產品照片的拍攝地點附近店家候選；這是照片 metadata 檢視功能，不會建立 AI 標記工作，也不會寫入 Synology Photos。
 
-| 使用案例 | v0.4.17 功能狀態 | 尚缺的主要能力 |
+UC-01 至 UC-04 是目標產品需求。下表列出已部署 v0.4.18 的功能狀態及尚待驗證項目：
+
+| 使用案例 | v0.4.18 功能狀態 | 尚缺的主要能力 |
 | --- | --- | --- |
 | UC-01 日本地點 | 支援日本候選快照、一般 AI 分析、自動寫入及 Dry run | 目標 NAS 實測與格式／空間相容性核對 |
 | UC-02 日期區間 | 支援拍攝日期篩選、快照、批次分析、自動寫入及 Dry run | 目標 NAS 驗證日期 metadata 與結果 |
 | UC-03 健檢範例 | 單張分析會自動寫入有效描述與標籤；既有描述會保留 | 敏感 OCR 欄位排除、隱私流程與目標 NAS 驗證 |
 | UC-04 已標籤照片 | 支援多個既有標籤條件及整批 enrichment | 目標 NAS 驗證標籤詞彙重用、新標籤建立與讀回 |
 
-已部署的 v0.4.17 映像支援最多 1000 張候選及 40 頁掃描；候選上限選項為 500、800、1000 張，達設定上限或掃描頁數上限時會標示快照不完整。映像亦提供一般照片分析、自動寫入／dry run 與讀回核對，並放大工作結果的分析／已寫入數字。新工作只在原描述為空時寫入 AI 描述；已有描述時保留原文並略過描述更新，標籤仍可安全新增及核對。v0.4.8 將略過條件限定為 Photo Tagger AI 描述或標籤成功寫入紀錄，單純標籤更名不會觸發略過。工作資料存在 SQLite；服務啟動時會把分析中項目標示為失敗、寫入中項目標示為需核對，避免不確定狀態自動重試。尚未實作透過 Photos API 自動調和中斷前後狀態。
+已部署的 v0.4.18 映像支援最多 1000 張候選及 40 頁掃描；候選上限選項為 500、800、1000 張，達設定上限或掃描頁數上限時會標示快照不完整。映像亦提供一般照片分析、自動寫入／dry run 與讀回核對，並放大工作結果的分析／已寫入數字。新工作只在原描述為空時寫入 AI 描述；已有描述時保留原文並略過描述更新，標籤仍可安全新增及核對。v0.4.8 將略過條件限定為 Photo Tagger AI 描述或標籤成功寫入紀錄，單純標籤更名不會觸發略過。工作資料存在 SQLite；服務啟動時會把分析中項目標示為失敗、寫入中項目標示為需核對，避免不確定狀態自動重試。尚未實作透過 Photos API 自動調和中斷前後狀態。
 
 正式上線前仍須完成中斷工作自動調和、格式／空間／API 版本相容矩陣，以及外部 OCR 資料傳輸告知。影片標註、跨全庫無限制掃描與直接寫入 Synology Photos 資料庫不在支援範圍內。
 
 ## Docker 版本與部署
+
+v0.4.18 僅在使用者展開單張照片 metadata，且該照片已有「產品」標籤時，才依 GPS 呼叫 Photon／OpenStreetMap 查找 500 公尺內的商店候選。清單合併同址同名的重複地圖項目，顯示繁體中文譯名、原始地圖名稱、店家類型與約略距離，並附 OSM attribution。翻譯只把公開店名與類型送到私有 MLX `/exec`；不傳照片或座標。OSM 查詢結果只在 Photo Tagger 記憶體中快取 6 小時，不會寫入 Synology Photos，也不代表購買店家。查詢失敗或翻譯無結果時保留地圖原名。
 
 v0.4.17 將連線提醒改為條件式：只有瀏覽器透過非 loopback 的 HTTP 存取時顯示；HTTPS 與 localhost／loopback（包含 SSH tunnel）不顯示。正式部署會拒絕使用 HTTP 的 `SYNOLOGY_URL`，確保伺服器到 NAS API 使用已驗證的 HTTPS。
 

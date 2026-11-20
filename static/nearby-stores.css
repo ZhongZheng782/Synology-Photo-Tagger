@@ -1,0 +1,10 @@
+.nearby-stores{display:grid;gap:6px;margin-top:12px;padding-top:11px;border-top:1px solid #edf0ec}
+.nearby-stores>strong{color:#34443a;font-size:10px}
+.nearby-stores>p{margin:0;color:#78847c;font-size:9px;line-height:1.55}
+.nearby-stores .nearby-store-list{display:grid;gap:6px;margin:0;padding:0;list-style:none}
+.nearby-stores .nearby-store-list li{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 8px;padding:7px 8px;border:1px solid #edf0ec;border-radius:7px;background:#fff}
+.nearby-stores .nearby-store-list li strong{min-width:0;color:#34443a;font-size:9px;overflow-wrap:anywhere}
+.nearby-stores .nearby-store-list li span{grid-column:1;color:#879189;font-size:8px}
+.nearby-stores .nearby-store-list li a{grid-column:2;grid-row:1 / span 2;align-self:center;color:#65876e;font-size:8px;text-decoration:none}
+.nearby-stores .nearby-attribution{width:max-content;color:#78847c;font-size:8px;text-decoration:underline;text-underline-offset:2px}
+.nearby-stores .nearby-store-retry{justify-self:start;padding:4px 8px;border:1px solid #dfe7df;border-radius:6px;background:#fff;color:#58745e;font-size:9px;cursor:pointer}
