@@ -41,6 +41,14 @@ if os.environ.get("TRUSTED_PROXY_PROTO", "false").lower() == "true":
     # proxy can reach it and supply X-Forwarded-Proto.
     app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1)
 
+
+@app.after_request
+def prevent_external_job_api_caching(response):
+    if request.path.startswith("/api/v1/"):
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+    return response
+
 API_INFO_PARAMS = {
     "api": "SYNO.API.Info",
     "version": "1",
@@ -51,7 +59,7 @@ API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 NAS_SESSION_TTL_SECONDS = 12 * 60 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.4.25")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.4.26")
 PHOTO_TAGGER_AI_PROFILE_VERSION = 1
 PHOTO_TAGGER_AI_VERSION_TAG = f"Photo Tagger AI v{PHOTO_TAGGER_AI_PROFILE_VERSION}"
 PHOTO_TAGGER_AI_VERSION_PATTERN = re.compile(r"^Photo Tagger AI v([0-9]+)$", re.IGNORECASE)
@@ -80,6 +88,14 @@ MLX_SERVER_API_KEY = (
     or read_secret_file(os.environ.get("MLX_SERVER_API_KEY_FILE", ""))
     or os.environ.get("MLX_SERVER_API_KEY_LEGACY", "").strip()
 )
+PHOTO_TAGGER_JOB_API_TOKEN = (
+    os.environ.get("PHOTO_TAGGER_JOB_API_TOKEN", "").strip()
+    or read_secret_file(os.environ.get("PHOTO_TAGGER_JOB_API_TOKEN_FILE", ""))
+)
+PHOTO_TAGGER_JOB_API_SCOPES = {
+    scope.strip() for scope in os.environ.get("PHOTO_TAGGER_JOB_API_SCOPES", "").split(",")
+    if scope.strip()
+}
 MLX_MODEL = os.environ.get("MLX_MODEL", "mlx-gemma4").strip() or "mlx-gemma4"
 MLX_OCR_ENGINE = os.environ.get("MLX_OCR_ENGINE", "baidu").strip().lower() or "baidu"
 MLX_TIMEOUT_SECONDS = max(30, int(os.environ.get("MLX_TIMEOUT_SECONDS", "900")))
@@ -257,6 +273,21 @@ def initialize_tag_job_db() -> None:
                 review_status TEXT NOT NULL DEFAULT 'needs_review',
                 updated_at REAL NOT NULL,
                 PRIMARY KEY(job_id, trip_group_id)
+            );
+            CREATE TABLE IF NOT EXISTS job_api_idempotency (
+                token_fingerprint TEXT NOT NULL,
+                idempotency_hash TEXT NOT NULL,
+                request_hash TEXT NOT NULL,
+                job_id TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                PRIMARY KEY(token_fingerprint, idempotency_hash)
+            );
+            CREATE INDEX IF NOT EXISTS job_api_idempotency_created
+                ON job_api_idempotency(created_at);
+            CREATE TABLE IF NOT EXISTS job_api_rate_limits (
+                token_fingerprint TEXT PRIMARY KEY,
+                window_started_at REAL NOT NULL,
+                request_count INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS tag_job_items_status
                 ON tag_job_items(job_id, status, review);
@@ -1297,6 +1328,71 @@ def metadata_api_session() -> NasSession | None:
         restore_scheduled_nas_session()
         nas = lookup()
     return nas
+
+
+def metadata_api_owner_context() -> tuple[str, str] | None:
+    credentials = encrypted_schedule_credentials()
+    if not credentials or credentials.get("base_url") != configured_base_url():
+        return None
+    username = credentials.get("username")
+    if not isinstance(username, str) or not username.strip():
+        return None
+    return owner_key_for(configured_base_url(), username), username
+
+
+def metadata_api_session_context() -> tuple[str, str, NasSession] | None:
+    account_context = metadata_api_owner_context()
+    if not account_context:
+        return None
+    owner_key, _username = account_context
+    nas = metadata_api_session()
+    if not nas:
+        return None
+    with _scheduled_nas_tokens_lock:
+        nas_token = _scheduled_nas_tokens.get(owner_key)
+    if not nas_token:
+        return None
+    return owner_key, nas_token, nas
+
+
+def authenticate_job_api(required_scopes: set[str]):
+    configured = PHOTO_TAGGER_JOB_API_TOKEN
+    metadata_token = os.environ.get("PHOTO_TAGGER_API_TOKEN", "").strip()
+    if len(configured) < 32 or configured == metadata_token:
+        return None, (jsonify({"ok": False, "error": "工作 API 尚未安全啟用。"}), 503)
+    if not request.is_secure:
+        return None, (jsonify({"ok": False, "error": "工作 API 僅允許 HTTPS。"}), 403)
+    supplied = request.headers.get("Authorization", "")
+    if not supplied.startswith("Bearer "):
+        return None, (jsonify({"ok": False, "error": "工作 API Token 無效。"}), 401)
+    supplied_token = supplied[7:].strip()
+    configured_digest = hashlib.sha256(configured.encode("utf-8")).digest()
+    supplied_digest = hashlib.sha256(supplied_token.encode("utf-8")).digest()
+    if not secrets.compare_digest(supplied_digest, configured_digest):
+        return None, (jsonify({"ok": False, "error": "工作 API Token 無效。"}), 401)
+    if not required_scopes.issubset(PHOTO_TAGGER_JOB_API_SCOPES):
+        return None, (jsonify({"ok": False, "error": "工作 API Token 缺少必要 scope。"}), 403)
+    account_context = metadata_api_owner_context()
+    if not account_context:
+        return None, (jsonify({"ok": False, "error": "尚未註冊 NAS 受信任裝置；請先在設定登入並註冊。"}), 503)
+    owner_key, _username = account_context
+    fingerprint = hashlib.sha256(configured.encode("utf-8")).hexdigest()
+    now = time.time()
+    with tag_job_db() as db:
+        row = db.execute("SELECT window_started_at,request_count FROM job_api_rate_limits WHERE token_fingerprint=?",
+                         (fingerprint,)).fetchone()
+        if row is None:
+            db.execute("INSERT INTO job_api_rate_limits(token_fingerprint,window_started_at,request_count) VALUES(?,?,1)",
+                       (fingerprint, now))
+        elif now - row["window_started_at"] >= 60:
+            db.execute("UPDATE job_api_rate_limits SET window_started_at=?,request_count=1 WHERE token_fingerprint=?",
+                       (now, fingerprint))
+        elif row["request_count"] >= 60:
+            return None, (jsonify({"ok": False, "error": "工作 API 請求過於頻繁，請稍後重試。"}), 429)
+        else:
+            db.execute("UPDATE job_api_rate_limits SET request_count=request_count+1 WHERE token_fingerprint=?",
+                       (fingerprint,))
+    return {"owner_key": owner_key, "token_fingerprint": fingerprint}, None
 
 
 @app.get("/api/v1/metadata/photos")
@@ -3745,6 +3841,254 @@ def download_travel_job_report(job_id: str):
     response = jsonify(report)
     response.headers["Content-Disposition"] = f'attachment; filename="travel-stay-{job_id[:8]}.json"'
     return response
+
+
+def api_call_trusted_route(route, path: str, method: str = "GET", body: dict | None = None,
+                           query_string: dict | None = None):
+    context = metadata_api_session_context()
+    account = metadata_api_owner_context()
+    if not context or not account:
+        return None, (jsonify({"ok": False, "error": "NAS 受信任裝置登入不可用；請重新登入並註冊裝置。"}), 503)
+    _owner_key, nas_token, _nas = context
+    _account_owner, username = account
+    with app.test_request_context(path, base_url=request.url_root, method=method,
+                                  json=body, query_string=query_string):
+        session["nas_session_token"] = nas_token
+        session["nas_account"] = username
+        result = route()
+    if isinstance(result, tuple):
+        return result[0], result[1]
+    return result, 200
+
+
+def safe_external_travel_report(report: dict) -> dict:
+    safe = dict(report)
+    safe["photos"] = [
+        {key: value for key, value in photo.items() if key not in {"latitude", "longitude"}}
+        for photo in report.get("photos", []) if isinstance(photo, dict)
+    ]
+    safe["privacy_note"] = "照片的精確 GPS 與原圖不包含在 API 報告中。"
+    return safe
+
+
+def external_travel_markdown(report: dict) -> str:
+    lines = ["# 旅行住宿線索報告", "", f"- 工作：`{report['job_id']}`", f"- 空間：{report['space']}",
+             f"- 範圍：{report['criteria'].get('country') or '未指定國家'} · "
+             f"{report['criteria'].get('date_from') or '最早'} 至 {report['criteria'].get('date_to') or '最新'}",
+             "", "> 飯店與旅行群組為待核對線索；住宿日期未由拍攝日期推定。", ""]
+    photos_by_id = {photo.get("photo_id"): photo for photo in report.get("photos", [])}
+    for group in report.get("trip_groups", []):
+        date_range = group.get("photo_date_range") or {}
+        lines.extend([f"## {group.get('trip_label') or '旅行群組'} · {date_range.get('from') or '日期未知'} 至 {date_range.get('to') or '日期未知'}",
+                      "", f"- 群組核對：{group.get('review_status', 'needs_review')}",
+                      f"- 分組規則：{group.get('grouping_rule', '')}", ""])
+        for candidate in (candidate for candidate in report.get("lodging_candidates", [])
+                          if candidate.get("trip_group_id") == group.get("trip_group_id")):
+            place = candidate.get("selected_place") or {}
+            lines.extend([f"### {candidate.get('hotel_name') or candidate.get('source_hotel_name') or '待確認飯店'}", "",
+                          f"- 照片辨識名稱：{candidate.get('source_hotel_name') or '未知'}",
+                          f"- 現名：{candidate.get('current_hotel_name') or '待核對'}",
+                          f"- 城市／地址：{candidate.get('city') or '未知'}／{candidate.get('address') or '待核對'}",
+                          f"- 住宿狀態：{candidate.get('review_status', 'needs_review')}",
+                          f"- 入住／退房：{candidate.get('check_in') or '待確認'}／{candidate.get('check_out') or '待確認'}",
+                          f"- 地圖候選：{place.get('display_name') or '未選擇'}"])
+            if place.get("osm_url"):
+                lines.append(f"- OpenStreetMap：{place['osm_url']}")
+            if candidate.get("official_url"):
+                lines.append(f"- 核對來源：{candidate['official_url']}")
+            elif place.get("website"):
+                lines.append(f"- 地圖資料所列網站（尚待核對）：{place['website']}")
+            lines.append("- 證據照片：")
+            for photo_id in candidate.get("evidence_photo_ids", []):
+                photo = photos_by_id.get(photo_id, {})
+                lines.append(f"  - {photo.get('filename') or photo_id}（拍攝日 {photo.get('photo_date') or '未知'}）")
+            lines.append("")
+    lines.extend(["", "地圖資料 attribution：© OpenStreetMap contributors (https://www.openstreetmap.org/copyright)"])
+    return "\n".join(lines)
+
+
+@app.post("/api/v1/jobs")
+def create_external_travel_job():
+    auth, error = authenticate_job_api({"travel:analyze"})
+    if error:
+        return error
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"ok": False, "error": "工作條件必須是 JSON 物件。"}), 400
+    if body.get("work_type", "travel_stay") != "travel_stay":
+        return jsonify({"ok": False, "error": "UC-06 MVP 目前只接受 travel_stay 工作。"}), 400
+    if body.get("space", "personal") != "personal":
+        return jsonify({"ok": False, "error": "UC-06 MVP 目前只支援已註冊帳號的個人空間。"}), 400
+    idempotency_key = request.headers.get("Idempotency-Key", "").strip()
+    if not 8 <= len(idempotency_key) <= 128 or any(ord(char) < 33 for char in idempotency_key):
+        return jsonify({"ok": False, "error": "請提供 8 至 128 字元的 Idempotency-Key。"}), 400
+    try:
+        request_bytes = json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "工作條件含有無效欄位。"}), 400
+    request_hash = hashlib.sha256(request_bytes).hexdigest()
+    idem_hash = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()
+    with tag_job_db() as db:
+        previous = db.execute(
+            "SELECT request_hash,job_id FROM job_api_idempotency WHERE token_fingerprint=? AND idempotency_hash=?",
+            (auth["token_fingerprint"], idem_hash),
+        ).fetchone()
+        if previous:
+            if previous["request_hash"] != request_hash:
+                return jsonify({"ok": False, "error": "此 Idempotency-Key 已用於不同工作條件。"}), 409
+            job = db.execute("SELECT status FROM tag_jobs WHERE id=? AND owner_key=?",
+                             (previous["job_id"], auth["owner_key"])).fetchone()
+            if not job:
+                return jsonify({"ok": False, "error": "此 Idempotency-Key 對應的工作已不存在。"}), 410
+            return jsonify({"ok": True, "job_id": previous["job_id"], "status": job["status"], "replayed": True}), 200
+    if not metadata_api_owner_context():
+        return jsonify({"ok": False, "error": "尚未註冊 NAS 受信任裝置。"}), 503
+    result, status = api_call_trusted_route(
+        create_travel_job, "/api/travel-jobs", "POST", {**body, "space": "personal"}
+    )
+    payload = result.get_json(silent=True) if isinstance(result, Response) else None
+    if status >= 400 or not isinstance(payload, dict) or not payload.get("ok"):
+        return result, status
+    job_id = payload.get("job_id")
+    if not isinstance(job_id, str):
+        return jsonify({"ok": False, "error": "工作建立回應缺少工作識別碼。"}), 500
+    replayed = False
+    response_status = 201
+    response_status_text = payload.get("status", "ready")
+    response_candidate_count = payload.get("candidate_count", 0)
+    response_snapshot_complete = payload.get("snapshot_complete", False)
+    with tag_job_db() as db:
+        db.execute("DELETE FROM job_api_idempotency WHERE created_at<?", (time.time() - 30 * 86400,))
+        cursor = db.execute(
+            "INSERT OR IGNORE INTO job_api_idempotency(token_fingerprint,idempotency_hash,request_hash,job_id,created_at) VALUES(?,?,?,?,?)",
+            (auth["token_fingerprint"], idem_hash, request_hash, job_id, time.time()),
+        )
+        if cursor.rowcount == 0:
+            previous = db.execute(
+                "SELECT request_hash,job_id FROM job_api_idempotency WHERE token_fingerprint=? AND idempotency_hash=?",
+                (auth["token_fingerprint"], idem_hash),
+            ).fetchone()
+            db.execute("DELETE FROM tag_jobs WHERE id=? AND owner_key=?", (job_id, auth["owner_key"]))
+            if not previous or previous["request_hash"] != request_hash:
+                return jsonify({"ok": False, "error": "Idempotency-Key 衝突，請使用新的 key。"}), 409
+            job_id = previous["job_id"]
+            existing = db.execute("SELECT status FROM tag_jobs WHERE id=? AND owner_key=?",
+                                  (job_id, auth["owner_key"])).fetchone()
+            response_status_text = existing["status"] if existing else response_status_text
+            replayed = True
+            response_status = 200
+    return jsonify({"ok": True, "job_id": job_id, "status": response_status_text,
+                    "candidate_count": response_candidate_count,
+                    "snapshot_complete": response_snapshot_complete, "replayed": replayed}), response_status
+
+
+@app.post("/api/v1/jobs/<job_id>/start")
+def start_external_travel_job(job_id: str):
+    auth, error = authenticate_job_api({"travel:analyze"})
+    if error:
+        return error
+    if len(job_id) != 32 or any(char not in "0123456789abcdef" for char in job_id):
+        return jsonify({"ok": False, "error": "工作識別碼格式無效。"}), 400
+    context = metadata_api_session_context()
+    if not context:
+        return jsonify({"ok": False, "error": "NAS 受信任裝置登入不可用；請重新登入並註冊裝置。"}), 503
+    owner_key, nas_token, _nas = context
+    if owner_key != auth["owner_key"]:
+        return jsonify({"ok": False, "error": "Token 帳號與受信任裝置帳號不一致。"}), 403
+    with tag_job_db() as db:
+        job = get_tag_job(db, owner_key, job_id)
+        if not job or json.loads(job["criteria_json"]).get("work_type") != "travel_stay":
+            return jsonify({"ok": False, "error": "找不到此旅行住宿工作。"}), 404
+        if job["status"] in {"preparing", "analyzing"}:
+            return jsonify({"ok": True, "job_id": job_id, "status": job["status"], "already_running": True}), 202
+    if not MLX_SERVER_API_KEY:
+        return jsonify({"ok": False, "error": "尚未設定本機 MLX API key。"}), 503
+    ok, message = queue_tag_job_analysis(job_id, owner_key, nas_token)
+    return (jsonify({"ok": ok, "job_id": job_id, "status": "analyzing" if ok else None,
+                     "error": message}), 202 if ok else 409)
+
+
+@app.get("/api/v1/jobs/<job_id>")
+def get_external_travel_job(job_id: str):
+    auth, error = authenticate_job_api({"travel:analyze"})
+    if error:
+        return error
+    if len(job_id) != 32 or any(char not in "0123456789abcdef" for char in job_id):
+        return jsonify({"ok": False, "error": "工作識別碼格式無效。"}), 400
+    with tag_job_db() as db:
+        detail = tag_job_detail_payload(db, auth["owner_key"], job_id)
+    if not detail or detail["job"].get("criteria", {}).get("work_type") != "travel_stay":
+        return jsonify({"ok": False, "error": "找不到此旅行住宿工作。"}), 404
+    job = detail["job"]
+    return jsonify({"ok": True, "job": job, "trip_groups": detail.get("travel_groups", []),
+                    "lodging_candidates": detail.get("travel_candidates", []),
+                    "photos": [{"photo_id": item["photo"].get("id"), "filename": item["photo"].get("filename"),
+                                "photo_date": item["photo"].get("photo_date"),
+                                "status": item.get("status"), "review": item.get("review"),
+                                "analysis": item.get("analysis")}
+                               for item in detail["items"]]})
+
+
+@app.get("/api/v1/jobs/<job_id>/report")
+def get_external_travel_report(job_id: str):
+    auth, error = authenticate_job_api({"travel:analyze"})
+    if error:
+        return error
+    if request.args.get("format", "json") not in {"json", "markdown", "md"}:
+        return jsonify({"ok": False, "error": "format 僅支援 json 或 markdown。"}), 400
+    fmt = request.args.get("format", "json")
+    inner_format = "md" if fmt in {"markdown", "md"} else "json"
+    with tag_job_db() as db:
+        job = get_tag_job(db, auth["owner_key"], job_id)
+        if not job or json.loads(job["criteria_json"]).get("work_type") != "travel_stay":
+            return jsonify({"ok": False, "error": "找不到此旅行住宿工作。"}), 404
+        detail = tag_job_detail_payload(db, auth["owner_key"], job_id)
+    criteria = detail["job"].get("criteria", {})
+    photos = []
+    for item in detail["items"]:
+        photo = item["photo"]
+        photos.append({"photo_id": photo.get("id"), "filename": photo.get("filename"),
+                       "photo_date": photo.get("photo_date"), "trip_group_id": photo.get("trip_group_id"),
+                       "country": photo.get("country"), "city": photo.get("city"),
+                       "status": item.get("status"), "review": item.get("review"),
+                       "analysis": item.get("analysis")})
+    report = {"schema_version": 2, "work_type": "travel_stay", "job_id": job_id, "space": job["space"],
+              "criteria": criteria, "trip_groups": detail.get("travel_groups", []),
+              "lodging_candidates": detail.get("travel_candidates", []), "photos": photos,
+              "attribution": "© OpenStreetMap contributors",
+              "license": "OpenStreetMap data is available under the Open Database License (ODbL).",
+              "note": "住宿候選、入住日期與旅行群組需人工核對。OpenStreetMap 結果只提供地點線索，不證明實際入住。"}
+    if inner_format == "json":
+        response = jsonify(safe_external_travel_report(report))
+        response.headers["Content-Disposition"] = f'attachment; filename="travel-stay-{job_id[:8]}.json"'
+        return response
+    response = Response(external_travel_markdown(report), mimetype="text/markdown; charset=utf-8")
+    response.headers["Content-Disposition"] = f'attachment; filename="travel-stay-{job_id[:8]}.md"'
+    return response
+
+
+@app.post("/api/v1/jobs/<job_id>/lodging-candidates/<candidate_key>/map-search")
+def map_search_external_travel_candidate(job_id: str, candidate_key: str):
+    auth, error = authenticate_job_api({"travel:analyze", "travel:map_lookup"})
+    if error:
+        return error
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"ok": False, "error": "查詢條件必須是 JSON 物件。"}), 400
+    if len(job_id) != 32 or any(char not in "0123456789abcdef" for char in job_id):
+        return jsonify({"ok": False, "error": "工作識別碼格式無效。"}), 400
+    map_body = {"consent": True}
+    for key, maximum in (("hotel_name", 160), ("city", 120)):
+        if key in body:
+            if not isinstance(body[key], str) or len(body[key]) > maximum:
+                return jsonify({"ok": False, "error": "飯店名稱或城市格式無效。"}), 400
+            map_body[key] = body[key]
+    result, status = api_call_trusted_route(
+        lambda: search_travel_candidate_map(job_id, candidate_key),
+        f"/api/travel-jobs/{job_id}/candidates/{candidate_key}/map-search",
+        "POST", map_body,
+    )
+    return result, status
 
 
 def call_job_write_route(nas_token: str, space: str, photo_id: int, tag_name: str) -> dict:

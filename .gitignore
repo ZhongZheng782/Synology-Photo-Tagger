@@ -9,3 +9,4 @@ data/
 !/secrets/nas-schedule-key.placeholder
 !/secrets/mlx-server-api-key.placeholder
 !/secrets/tailscale-authkey.placeholder
+!/secrets/photo-tagger-job-api-token.placeholder

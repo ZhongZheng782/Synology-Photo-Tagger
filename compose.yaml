@@ -1,6 +1,6 @@
 services:
   synology-photo-tagger:
-    image: wenchiehlee1020/synology-photo-tagger:v0.4.25
+    image: wenchiehlee1020/synology-photo-tagger:v0.4.26
     build: .
     container_name: SYNOLOGY-PHOTO-TAGGER
     restart: unless-stopped
@@ -16,6 +16,8 @@ services:
       APP_GID: ${APP_GID:-100}
       SYNOLOGY_URL: ${SYNOLOGY_URL:-}
       PHOTO_TAGGER_API_TOKEN: ${PHOTO_TAGGER_API_TOKEN:-}
+      PHOTO_TAGGER_JOB_API_TOKEN_FILE: /run/secrets/photo-tagger-job-api-token
+      PHOTO_TAGGER_JOB_API_SCOPES: ${PHOTO_TAGGER_JOB_API_SCOPES:-travel:analyze,travel:map_lookup}
       MLX_SERVER_URL: ${MLX_SERVER_URL:-http://mac-mini.tail28f10.ts.net:5001}
       MLX_SERVER_API_KEY_FILE: /run/secrets/mlx-server-api-key
       MLX_MODEL: ${MLX_MODEL:-mlx-gemma4}
@@ -44,6 +46,7 @@ services:
       - nas-schedule-key
       - mlx-server-api-key
       - tailscale-authkey
+      - photo-tagger-job-api-token
 
 volumes:
   tailscale-state:
@@ -56,3 +59,5 @@ secrets:
     file: ${MLX_SERVER_API_KEY_SOURCE:-./secrets/mlx-server-api-key.placeholder}
   tailscale-authkey:
     file: ${TAILSCALE_AUTHKEY_SOURCE:-./secrets/tailscale-authkey.placeholder}
+  photo-tagger-job-api-token:
+    file: ${PHOTO_TAGGER_JOB_API_TOKEN_SOURCE:-./secrets/photo-tagger-job-api-token.placeholder}

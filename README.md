@@ -300,18 +300,18 @@ v0.4.12 將每日排程的查詢範圍設為執行日與前一日，並使用 Ph
 
 ## 目前 AI 標記工作範圍
 
-v0.4.25 延續本機 metadata catalog 與 AI 標記工作，並加入唯讀的旅行住宿線索工作 MVP。
+v0.4.26 加入 UC-06 唯讀旅行工作 API，可由授權客戶端建立及啟動 UC-05 住宿分析、讀取進度與下載報告；獲授 `travel:map_lookup` scope 時，也可直接查指定住宿候選的公開地圖。API 沒有任何 Synology Photos 寫入權限。
 
-UC-01 至 UC-06 是目標產品需求。下表列出 v0.4.25 的功能狀態及尚待完成項目：
+UC-01 至 UC-06 是目標產品需求。下表列出 v0.4.26 的功能狀態及尚待完成項目：
 
-| 使用案例 | v0.4.25 功能狀態 | 尚缺的主要能力 |
+| 使用案例 | v0.4.26 功能狀態 | 尚缺的主要能力 |
 | --- | --- | --- |
 | UC-01 日本地點 | 支援日本候選快照、一般 AI 分析、自動寫入及 Dry run | 目標 NAS 實測與格式／空間相容性核對 |
 | UC-02 日期區間 | 支援拍攝日期篩選、快照、批次分析、自動寫入及 Dry run | 目標 NAS 驗證日期 metadata 與結果 |
 | UC-03 健檢範例 | 單張分析會自動寫入有效描述與標籤；既有描述會保留 | 敏感 OCR 欄位排除、隱私流程與目標 NAS 驗證 |
 | UC-04 已標籤照片 | 支援多個既有標籤條件及整批 enrichment | 目標 NAS 驗證標籤詞彙重用、新標籤建立與讀回 |
 | UC-05 旅行住宿辨識 | MVP：本機目錄選片、固定快照、MLX 逐張住宿線索、跨日群組、人工核對日期、逐筆同意後查詢 OSM、Markdown／JSON 報告 | 飯店歷史更名與營業年代核實、無 GPS 照片的多證據旅行群組；詳見 [功能規格](#uc-05-旅行住宿辨識與歷史重建) |
-| UC-06 外部 AI 工作管理 API | 規劃中，尚未實作 | 獨立 scope、唯讀分析工作建立／監控／報告與後續寫入確認；詳見 [功能規格](#uc-06-外部-ai-工作管理-api規劃中) |
+| UC-06 外部 AI 工作管理 API | v0.4.26 提供唯讀旅行工作建立／啟動／進度／報告及 scope 保護的公開地圖查詢 | 暫停續跑、一般 AI 分析與任何 Photos 寫入權限；詳見 [功能規格](#uc-06-外部-ai-工作管理-api) |
 
 本機 metadata catalog 與工作資料分存在同一個持久化 volume 的獨立 SQLite 檔案。AI 工作提供最多 1000 張候選、一般照片分析、自動寫入／dry run 與 Photos API 讀回核對。v0.4.23 將 `Photo Tagger AI v1` 作為 AI 標記設定版本，與 Docker 映像版本分開。一般 AI 寫入只有在內容寫入成功且 Photos API 讀回核對版本標記後，才記錄目前版本；Dry run 與單純批次更名不會加版本標記。新版新增獨立的「升級 AI 標記版本」工作，可選擇 Photo Tagger 可確認的 AI 成功紀錄、指定較舊版標記，或依地點／日期／既有標籤篩選尚無任何版本標記的照片。升級會重新分析並依一般工作規則寫入與核對；非空描述仍保留，不會被覆寫。候選數量受工作上限限制，超過上限可再建立工作處理後續候選。版本標記存在 Synology Photos；可確認的 AI 成功紀錄存在本機 SQLite，並按 NAS 帳號與空間隔離。舊版資料庫中無法判斷是 AI 寫入或單純更名的紀錄會標示為來源不明，不會用作 AI 升級或略過依據；這些歷史照片可改用篩選來源處理。v0.4.8 將一般工作略過條件限定為 Photo Tagger AI 描述或標籤成功寫入紀錄，單純標籤更名不會觸發略過。服務啟動時會把分析中項目標示為失敗、寫入中項目標示為需核對，避免不確定狀態自動重試；尚未實作透過 Photos API 自動調和中斷前後狀態。
 
@@ -329,7 +329,7 @@ UC-01 至 UC-06 是目標產品需求。下表列出 v0.4.25 的功能狀態及�
 - 結果只保存清理後的飯店名稱、城市、線索類型、簡短描述與理由；不保存模型原文或 OCR 原文。旅行住宿工作不會呼叫 Photos API 寫入，人工操作只標示照片線索「確認」或「排除」。
 - 依同一國家、相鄰拍攝日期間隔不超過 14 日產生旅行群組建議；可編輯群組名稱並確認／排除。這是供人工核對的時間分組線索，不代表已確認為同一趟旅行。
 - 在每個飯店候選卡片中，可手動輸入住退房日期及確認狀態。日期不會從照片拍攝日期自動推論。
-- 使用者每次查詢前需勾選同意並按「查詢公開地圖候選」。只傳送飯店名稱、城市與國家至 OpenStreetMap Nominatim；不傳照片、精確 GPS 或 NAS 帳號。結果快取 24 小時、每秒最多發出一個新查詢、顯示 attribution。若 OSM 資料有 website 標籤，提供連結給使用者自行核對；OSM 結果不等於官方確認。
+- 在 Web UI 中，每次查詢前需勾選同意並按「查詢公開地圖候選」。UC-06 外部 API 可在 Token 獲授 `travel:map_lookup` scope 後直接呼叫查詢端點。兩種方式都只傳送飯店名稱、城市與國家至 OpenStreetMap Nominatim；不傳照片、精確 GPS 或 NAS 帳號。結果快取 24 小時、每秒最多發出一個新查詢、顯示 attribution。若 OSM 資料有 website 標籤，提供連結給使用者自行核對；OSM 結果不等於官方確認。
 - 以旅行群組與相同飯店名稱彙整照片證據，提供 Markdown 與 JSON 報告下載。報告保留地圖來源、人工核對狀態及未確認欄位的 null 值。
 
 ### 目標與工作流程
@@ -361,37 +361,78 @@ UC-01 至 UC-06 是目標產品需求。下表列出 v0.4.25 的功能狀態及�
 
 公開地圖查詢使用 [Nominatim 使用政策](https://operations.osmfoundation.org/policies/nominatim/)所述的使用者觸發查詢、明確 User-Agent、快取、每秒最多一筆及 attribution 要求。使用者每次查詢均可略過；不會批次或背景查詢。
 
-## UC-06 外部 AI 工作管理 API（規劃中）
+## UC-06 外部 AI 工作管理 API
 
-**狀態：** 2026-11-21 新增需求，尚未實作。目標是讓 Llm-Cli-APIServer 等授權客戶端建立、監控及下載 AI 工作結果，不必使用瀏覽器登入；不擴張現有唯讀 Metadata Token 權限。
+**狀態：** v0.4.26 提供唯讀旅行工作 MVP。它讓 Llm-Cli-APIServer 等授權客戶端建立、啟動、監控及下載 UC-05 工作結果，不必使用瀏覽器登入；不擴張現有唯讀 Metadata Token 權限。
 
-### 權限與安全
+### MVP 啟用方式
 
-- 專用工作 API Token 與既有 `PHOTO_TAGGER_API_TOKEN` 分離；預設停用、HTTPS only、最少 32 字元高熵 Token，不得提交 Git 或記錄明文。
-- 權限分開：`travel:analyze`（UC-05 唯讀）、`ai:analyze`（一般 AI dry run）、`ai:write`（實際標記／描述寫入，獨立啟用與明確確認）。唯讀 Token 不可寫入照片或執行一般 AI 寫入工作。
-- 綁定既有受信任裝置與固定 NAS 帳號／個人空間；每個工作建立、狀態、結果與控制操作都驗證 owner 及 scope。不提供 NAS session、原圖、帳密或敏感 OCR 原文。
-- 使用既有工作引擎、固定候選快照、工作上限及持久化狀態。限制併發與速率；用 idempotency key 避免重複建立及重複寫入；寫入工作必須先 dry run 並確認同一快照及影響項目。
+- 產生獨立 Token：`python3 -c 'import secrets; print(secrets.token_urlsafe(48))'`，將結果存入 `PHOTO_TAGGER_JOB_API_TOKEN_SOURCE` 指定的 NAS 主機檔案，權限設為 `600`。Compose 以 Docker secret file 掛載；空白／缺少檔案時 API 停用。Token 至少 32 字元，必須與 `PHOTO_TAGGER_API_TOKEN` 不同；不得提交 Git 或寫入日誌。設定 scope 後重建容器。
+- 外部 API 固定綁定目前已註冊受信任裝置的 NAS 帳號，MVP 只允許其個人空間。建立與啟動工作前需有完整同步的本機 metadata catalog 及可用的 NAS 受信任工作階段。
+- 目前部署預設授予 `travel:map_lookup`。此 scope 代表使用者同意 API 把明確指定的候選飯店名稱、城市與國家傳送到 Nominatim；不需 Web UI checkbox。每次 API 請求只查指定候選，沿用 24 小時快取、全服務每秒一筆新查詢上限與 attribution，不會背景批次查詢。若要停用地圖查詢，從 `PHOTO_TAGGER_JOB_API_SCOPES` 移除此 scope 並重建容器。
+- API 僅接受 HTTPS 與 `Authorization: Bearer <PHOTO_TAGGER_JOB_API_TOKEN>`，每 Token 每分鐘最多 60 個請求。Metadata Token、無效 Token、scope 不足、跨 owner 的工作 ID 都會被拒絕。API 報告不回傳照片原圖或照片精確 GPS。
 
-### 建議 API 契約（待實作）
+### 已實作的唯讀端點
 
 | 方法／路徑 | 行為 |
 | --- | --- |
-| POST /api/v1/jobs | 建立指定日期／國家、候選上限及 work_type 的工作；預設 dry_run |
-| POST /api/v1/jobs/{job_id}/start | 啟動已建立的唯讀分析工作 |
-| GET /api/v1/jobs/{job_id} | 工作狀態、進度、完成／失敗／略過計數與快照完整度 |
-| POST /api/v1/jobs/{job_id}/pause | 請求在安全的逐張邊界暫停 |
-| POST /api/v1/jobs/{job_id}/resume | 從已保存進度續跑 |
-| GET /api/v1/jobs/{job_id}/report?format=json 或 markdown | 下載已清理報告，保留未確認欄位 |
-| POST /api/v1/jobs/{job_id}/apply | 僅獨立寫入權限且確認 dry-run 快照時可執行；逐張 Photos API 寫入及讀回核對 |
+| POST `/api/v1/jobs` | 只接受 `travel_stay` 與 `personal`；需 `Idempotency-Key`（8–128 字元），重複 key 和相同內容回傳原工作，不同內容回傳 409 |
+| POST `/api/v1/jobs/{job_id}/start` | 啟動旅行住宿分析；重複 start 在工作執行中會回傳目前狀態 |
+| GET `/api/v1/jobs/{job_id}` | 回傳 owner 範圍內的狀態、逐張分析結果、群組與住宿候選；不回傳照片原圖、GPS 或縮圖內部快取鍵 |
+| GET `/api/v1/jobs/{job_id}/report?format=json` 或 `format=markdown` | 下載已清理的旅行報告 |
+| POST `/api/v1/jobs/{job_id}/lodging-candidates/{candidate_key}/map-search` | 需 `travel:analyze` 與 `travel:map_lookup`；直接查指定候選並回傳候選、attribution 及隱私說明 |
+
+建立工作的 JSON 欄位為 `work_type`（固定 `travel_stay`）、`space`（固定 `personal`）、`country`、`date_from`、`date_to`、`max_candidates`。地圖查詢可傳 `hotel_name` 與 `city` 覆寫候選值；國家取自工作條件。API 不會自動查詢所有候選，也不會寫入 Synology Photos。
+
+呼叫範例（以 Llm-Cli-APIServer 的受保護環境變數提供 Token）：
+
+```sh
+curl --fail-with-body -X POST "$PHOTO_TAGGER_API_URL/api/v1/jobs" \
+  -H "Authorization: Bearer $PHOTO_TAGGER_JOB_API_TOKEN" \
+  -H 'Idempotency-Key: japan-trip-2026-11-v1' \
+  -H 'Content-Type: application/json' \
+  -d '{"work_type":"travel_stay","space":"personal","country":"日本","date_from":"2026-11-01","date_to":"2026-11-07","max_candidates":100}'
+
+curl --fail-with-body -X POST "$PHOTO_TAGGER_API_URL/api/v1/jobs/$JOB_ID/start" \
+  -H "Authorization: Bearer $PHOTO_TAGGER_JOB_API_TOKEN"
+
+curl --fail-with-body "$PHOTO_TAGGER_API_URL/api/v1/jobs/$JOB_ID" \
+  -H "Authorization: Bearer $PHOTO_TAGGER_JOB_API_TOKEN"
+
+curl --fail-with-body "$PHOTO_TAGGER_API_URL/api/v1/jobs/$JOB_ID/report?format=markdown" \
+  -H "Authorization: Bearer $PHOTO_TAGGER_JOB_API_TOKEN"
+```
+
+若 Token 獲授 `travel:map_lookup`，Client 可對回傳的住宿候選逐筆呼叫 `POST /api/v1/jobs/$JOB_ID/lodging-candidates/$CANDIDATE_KEY/map-search`，JSON body 可提供 `hotel_name` 與 `city`。同一個 Idempotency-Key 必須重用於完全相同的建立請求；不同條件請使用新 key。
+
+### 權限與安全
+
+- 專用工作 API Token 與既有 `PHOTO_TAGGER_API_TOKEN` 分離；Token 空白時預設停用，HTTPS only、最少 32 字元高熵 Token，不得提交 Git 或記錄明文。
+- 權限分開：`travel:analyze`（UC-05 唯讀分析）、`travel:map_lookup`（代表使用者同意 API 將飯店名稱、城市與國家送至 OpenStreetMap Nominatim 查詢）、`ai:analyze`（一般 AI dry run）、`ai:write`（實際標記／描述寫入，獨立啟用與明確確認）。唯讀 Token 不可寫入照片或執行一般 AI 寫入工作；沒有 `travel:map_lookup` 的 Token 不可查公開地圖。
+- 綁定既有受信任裝置與固定 NAS 帳號／個人空間；每個工作建立、狀態、結果與控制操作都驗證 owner 及 scope。不提供 NAS session、原圖、帳密或敏感 OCR 原文。
+- 使用既有工作引擎、固定候選快照、工作上限及持久化狀態。限制併發與速率；用 idempotency key 避免重複建立及重複寫入；寫入工作必須先 dry run 並確認同一快照及影響項目。
+- `travel:map_lookup` 可讓外部 API 直接發起公開地圖查詢，不需瀏覽器 checkbox；Token 設定／授權時即代表使用者同意傳送上述欄位。每次 API 呼叫只查指定住宿候選，不傳照片、精確 GPS 或 NAS 帳號；沿用 24 小時快取、全服務每秒最多一筆新 Nominatim 請求及 attribution。不得在背景或未經 API 呼叫時批次查詢；OSM 結果仍只是地點線索，不代表實際入住或官方核實。
+
+### API 契約與後續階段
+
+| 方法／路徑 | 行為 |
+| --- | --- |
+| POST `/api/v1/jobs` | 已實作：建立限定 `travel_stay`、個人空間的旅行工作；需 `Idempotency-Key` |
+| POST `/api/v1/jobs/{job_id}/start` | 已實作：啟動唯讀旅行住宿分析 |
+| GET `/api/v1/jobs/{job_id}` | 已實作：讀取工作狀態、逐張結果、群組與住宿候選 |
+| POST `/api/v1/jobs/{job_id}/lodging-candidates/{candidate_key}/map-search` | 已實作：需 `travel:map_lookup`；直接查指定候選並回傳 attribution |
+| GET `/api/v1/jobs/{job_id}/report?format=json` 或 `markdown` | 已實作：下載已清理報告 |
+| POST `/api/v1/jobs/{job_id}/pause`、`resume` | 後續階段 |
+| 一般 AI 分析／Photos 寫入 | 後續評估；目前 API 不提供 |
 
 錯誤應明確區分未啟用、無效 Token、scope 不足、catalog 未完整同步、日期／上限無效、NAS 受信任登入不可用、工作不存在或非本帳號、併發與速率限制；不回傳敏感資訊。
 
 ### 開發順序與驗收
 
-1. MVP：先提供 UC-05 唯讀工作建立、啟動、進度與報告；其後加入暫停及續跑，最後才考慮一般 AI 標記寫入。
-2. 用日本歷史旅行日期區間（例如一週）驗證候選選取、MLX 分析、旅行群組與報告；每日均衡取樣、無 GPS 照片處理、異名／同名飯店分離、non_lodging 排除及敏感欄位過濾列入 UC-05 改善驗收。公開地圖查詢仍須逐筆明確同意。
-3. 測試既有 Metadata Token 無法建立工作、跨 owner 拒絕、唯讀 scope 無法寫入、重複請求、候選超限、停止／續跑、敏感資訊遮蔽及未啟用時的拒絕行為。
-4. 先於測試環境驗證，再部署；以 Llm-Cli-APIServer 實際建立唯讀工作並取得報告，才標示已完成。取得報告後由使用者另行授權更新旅行 repo。
+1. v0.4.26 MVP：提供 UC-05 唯讀工作建立、啟動、進度、報告及受 `travel:map_lookup` scope 保護的單筆公開地圖查詢；後續再加入暫停及續跑，最後才評估一般 AI 標記寫入。
+2. 用日本歷史旅行日期區間（例如一週）驗證候選選取、MLX 分析、旅行群組與報告；每日均衡取樣、無 GPS 照片處理、異名／同名飯店分離、non_lodging 排除及敏感欄位過濾列入 UC-05 改善驗收。Web UI 查詢仍須逐筆 checkbox 同意；API 查詢須先授予 `travel:map_lookup` scope，並由每次 API 呼叫明確觸發。
+3. 發佈前驗證既有 Metadata Token 無法建立工作、跨 owner 拒絕、scope 不足、重複請求、敏感資訊遮蔽及未啟用時的拒絕行為。
+4. 先於測試環境驗證，再部署；以 Llm-Cli-APIServer 實際建立唯讀工作並取得報告，才標示 UC-06 發佈完成。取得報告後由使用者另行授權更新旅行 repo。
 
 ## Docker 版本與部署
 

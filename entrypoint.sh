@@ -61,8 +61,8 @@ for writable_file in "$TAGGER_DB_PATH" "${TAGGER_DB_PATH}-wal" "${TAGGER_DB_PATH
     fi
 done
 
-# Read secret mounts as root, then pass only the MLX and schedule keys to the
-# web process. The Tailscale auth key is removed before Gunicorn starts.
+# Read secret mounts as root, then pass only the required keys to the web
+# process. The Tailscale auth key is removed before Gunicorn starts.
 MLX_SERVER_API_KEY_FILE="${MLX_SERVER_API_KEY_FILE:-/run/secrets/mlx-server-api-key}"
 if [ -z "${MLX_SERVER_API_KEY:-}" ] && [ -s "$MLX_SERVER_API_KEY_FILE" ]; then
     MLX_SERVER_API_KEY="$(cat "$MLX_SERVER_API_KEY_FILE")"
@@ -72,6 +72,12 @@ if [ -z "${MLX_SERVER_API_KEY:-}" ]; then
 fi
 if [ -n "${MLX_SERVER_API_KEY:-}" ]; then
     export MLX_SERVER_API_KEY
+fi
+
+PHOTO_TAGGER_JOB_API_TOKEN_FILE="${PHOTO_TAGGER_JOB_API_TOKEN_FILE:-/run/secrets/photo-tagger-job-api-token}"
+if [ -z "${PHOTO_TAGGER_JOB_API_TOKEN:-}" ] && [ -s "$PHOTO_TAGGER_JOB_API_TOKEN_FILE" ]; then
+    PHOTO_TAGGER_JOB_API_TOKEN="$(cat "$PHOTO_TAGGER_JOB_API_TOKEN_FILE")"
+    export PHOTO_TAGGER_JOB_API_TOKEN
 fi
 
 NAS_SCHEDULE_KEY_FILE="${NAS_SCHEDULE_KEY_FILE:-/run/secrets/nas-schedule-key}"
