@@ -28,7 +28,9 @@ def default_catalog_path() -> str:
     configured = os.environ.get("PHOTO_CATALOG_DB_PATH", "").strip()
     if configured:
         return configured
-    job_db = os.environ.get("TAGGER_DB_PATH", "/data/app/photo-tagger.sqlite3")
+    job_db = os.environ.get(
+        "TAGGER_DB_PATH", str(Path(__file__).resolve().parent / "data" / "photo-tagger.sqlite3")
+    )
     return str(Path(job_db).with_name("photo-catalog.sqlite3"))
 
 
