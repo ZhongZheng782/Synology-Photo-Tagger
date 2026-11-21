@@ -5,6 +5,7 @@ A Python web app for browsing Synology Photos, generating photo descriptions and
 ## Current features
 
 - Builds a resumable local metadata catalog through read-only Synology Photos API calls. Personal/shared spaces and NAS accounts are isolated. Metadata is stored in a separate SQLite file on the persistent Docker volume; original images are not downloaded or stored. Catalog synchronization currently includes photos, not videos.
+- Uses offset pagination; if photos are added during a long synchronization, run another sync afterward. It retains catalog entries absent from NAS to avoid misclassifying pagination shifts as deletions.
 - Searches the local catalog by date range, country, location, filename, description, camera, lens, exact tag, and exact Synology Photos person name. Query results show thumbnails proxied live from Synology Photos.
 - Provides a read-only in-container Python query command: `docker exec -it SYNOLOGY-PHOTO-TAGGER python /app/scripts/query_photo_catalog.py --space personal --tag '產品'`. It prompts for the NAS account used to scope the local catalog and does not connect to NAS.
 

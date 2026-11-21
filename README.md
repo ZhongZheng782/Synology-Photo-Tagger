@@ -317,7 +317,7 @@ v0.4.20 映像新增本機 metadata catalog；工作資料和 catalog 分存在�
 
 ## Docker 版本與部署
 
-v0.4.20 新增本機 metadata catalog 與查詢介面。使用者可分別同步個人空間與共享空間；服務每頁列出最多 100 張照片，再以 Photos API 批次取得 EXIF、描述、GPS／地址、標籤與 Synology Photos 人物，保存至 `/data/app/photo-catalog.sqlite3`。同步可在容器重新啟動後續跑；只有完整同步才更新「最近完成」時間。每個 NAS 帳號與空間的資料以帳號雜湊隔離。catalog 只保存 metadata，不下載或保存原圖；查詢結果的縮圖仍由已登入的 Photos API 即時代理，並不存入 catalog。同步目前涵蓋照片項目，不含影片。
+v0.4.20 新增本機 metadata catalog 與查詢介面。使用者可分別同步個人空間與共享空間；服務每頁列出最多 100 張照片，再以 Photos API 批次取得 EXIF、描述、GPS／地址、標籤與 Synology Photos 人物，保存至 `/data/app/photo-catalog.sqlite3`。同步可在容器重新啟動後續跑；只有完整同步才更新「最近完成」時間。每個 NAS 帳號與空間的資料以帳號雜湊隔離。catalog 只保存 metadata，不下載或保存原圖；查詢結果的縮圖仍由已登入的 Photos API 即時代理，並不存入 catalog。同步目前涵蓋照片項目，不含影片。由於 Photos API 使用 offset 分頁，若掃描時 NAS 照片庫同時新增項目，請在新增完成後再次同步；catalog 不會自動刪除 NAS 上已不存在的舊項目，避免把分頁位移誤判為刪除。
 
 ### 如何查詢本機 catalog
 

@@ -94,7 +94,7 @@
         <details class="photo-catalog" id="photo-catalog">
           <summary><span><strong>本機 metadata 目錄</strong><small>先同步一次，再用本機資料查詢照片</small></span><span class="catalog-summary-status" id="catalog-summary-status">尚未同步</span></summary>
           <div class="catalog-body">
-            <p class="catalog-intro">同步會透過 Synology Photos API 讀取照片資訊，保存於容器的持久化 SQLite volume；不下載或保存原圖。個人空間與共享空間分開同步。目錄可在容器重啟後續跑。</p>
+            <p class="catalog-intro">同步會透過 Synology Photos API 讀取照片資訊，保存於容器的持久化 SQLite volume；不下載或保存原圖。個人空間與共享空間分開同步。目錄可在容器重啟後續跑。為避免分頁期間 NAS 新增照片造成 offset 位移，目錄不會自動刪除 NAS 上已不存在的舊項目。</p>
             <div class="catalog-sync-row"><label>同步空間<select id="catalog-space"><option value="personal">個人空間</option><option value="shared">共享空間</option></select></label><button class="primary-button" id="catalog-sync-button" type="button">同步完整目錄 →</button><button class="secondary-button" id="catalog-refresh-status" type="button">更新狀態</button></div>
             <div class="catalog-sync-status" id="catalog-sync-status" role="status" aria-live="polite">登入後查看此空間的目錄狀態。</div>
             <div class="catalog-query-heading"><h3>查詢本機目錄</h3><span>條件會同時套用</span></div>

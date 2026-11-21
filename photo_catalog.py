@@ -338,15 +338,6 @@ def finish_sync(owner_key: str, space: str, run_id: str, next_offset: int, scann
     with connect_catalog(path) as db:
         db.execute("BEGIN IMMEDIATE")
         db.execute(
-            "UPDATE photo_catalog SET missing_runs=missing_runs+1 "
-            "WHERE owner_key=? AND space=? AND last_seen_run_id<>? AND is_deleted=0",
-            (owner_key, space, run_id),
-        )
-        db.execute(
-            "UPDATE photo_catalog SET is_deleted=1 WHERE owner_key=? AND space=? AND missing_runs>=2",
-            (owner_key, space),
-        )
-        db.execute(
             "UPDATE photo_catalog_sync SET status='complete',next_offset=?,scanned_count=?,updated_at=?,last_success_at=?,error=NULL "
             "WHERE owner_key=? AND space=? AND run_id=?",
             (next_offset, scanned_count, now, now, owner_key, space, run_id),
