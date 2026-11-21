@@ -24,6 +24,7 @@ from cryptography.fernet import Fernet, InvalidToken
 import requests
 from flask import Flask, Response, copy_current_request_context, jsonify, render_template, request, session
 from werkzeug.middleware.proxy_fix import ProxyFix
+import photo_catalog
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("APP_SECRET_KEY") or secrets.token_hex(32)
@@ -49,7 +50,7 @@ API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 NAS_SESSION_TTL_SECONDS = 12 * 60 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.4.19")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.4.20")
 TAGGER_DB_PATH = os.environ.get(
     "TAGGER_DB_PATH", os.path.join(os.path.dirname(__file__), "data", "photo-tagger.sqlite3")
 )
@@ -150,6 +151,9 @@ _schedule_restore_last_success = 0.0
 _schedule_restore_lock = threading.Lock()
 _scheduled_jobs_active: set[str] = set()
 _scheduled_jobs_active_lock = threading.Lock()
+_photo_catalog_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="photo-catalog")
+_photo_catalog_active: set[tuple[str, str]] = set()
+_photo_catalog_active_lock = threading.Lock()
 
 
 @contextmanager
@@ -269,10 +273,73 @@ def initialize_tag_job_db() -> None:
 
 
 initialize_tag_job_db()
+photo_catalog.initialize_catalog()
+photo_catalog.mark_running_syncs_interrupted()
 
 _tag_replacement_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tag-replacement")
 _tag_replacement_jobs: dict[str, dict] = {}
 _tag_replacement_jobs_lock = threading.Lock()
+
+
+def run_photo_catalog_sync(owner_key: str, space: str, run_id: str, offset: int,
+                           scanned_count: int, nas_token: str) -> None:
+    api_name = "SYNO.Foto.Browse.Item" if space == "personal" else "SYNO.FotoTeam.Browse.Item"
+    try:
+        while True:
+            with app.test_request_context("/"):
+                session["nas_session_token"] = nas_token
+                nas = current_nas_session()
+                if not nas:
+                    raise SynologyApiError("NAS 登入工作階段已失效；可重新登入後繼續同步。")
+                url, version = api_endpoint(nas, api_name)
+                listed = post_synology(nas.client, url, {
+                    "api": api_name, "version": version, "method": "list",
+                    "offset": offset, "limit": photo_catalog.PAGE_SIZE,
+                    "type": "photo", "sort_by": "takentime", "sort_direction": "desc",
+                    "additional": json.dumps(["thumbnail", "resolution", "gps", "address", "tag"], separators=(",", ":")),
+                    "_sid": nas.sid,
+                })
+                data = listed.get("data")
+                summaries = data.get("list") if isinstance(data, dict) else None
+                if not isinstance(summaries, list):
+                    raise SynologyApiError("Photos API 回應中沒有清單資料。")
+                summaries = [item for item in summaries if isinstance(item, dict)]
+                if not summaries:
+                    photo_catalog.finish_sync(owner_key, space, run_id, offset, scanned_count)
+                    return
+                ids = [item.get("id") for item in summaries]
+                if any(not isinstance(photo_id, (int, str)) or not str(photo_id).isdigit() for photo_id in ids):
+                    raise SynologyApiError("Photos API 清單含無效項目 ID。")
+                details_payload = post_synology(nas.client, url, {
+                    "api": api_name, "version": version, "method": "get",
+                    "id": json.dumps([int(photo_id) for photo_id in ids], separators=(",", ":")),
+                    "additional": json.dumps(["exif", "description", "orientation", "orientation_original", "resolution", "gps", "address", "geocoding_id", "tag", "person"], separators=(",", ":")),
+                    "_sid": nas.sid,
+                })
+                detail_data = details_payload.get("data")
+                details = detail_data.get("list") if isinstance(detail_data, dict) else None
+                if not isinstance(details, list):
+                    raise SynologyApiError("Photos API 回應中沒有詳細 metadata。")
+                details_by_id = {str(item.get("id")): item for item in details if isinstance(item, dict)}
+                if any(str(photo_id) not in details_by_id for photo_id in ids):
+                    raise SynologyApiError("Photos API 詳細資料不完整；已保留目前進度，可稍後繼續。")
+                records = [photo_catalog._catalog_record(summary, details_by_id[str(summary["id"])], owner_key, space, run_id)
+                           for summary in summaries]
+                if any(record[0].get("photo_id") is None for record in records):
+                    raise SynologyApiError("Photos API 詳細資料缺少有效項目 ID。")
+                next_offset = offset + len(summaries)
+                scanned_count += len(summaries)
+                photo_catalog.save_sync_batch(owner_key, space, run_id, records, next_offset, scanned_count)
+                offset = next_offset
+                if len(summaries) < photo_catalog.PAGE_SIZE:
+                    photo_catalog.finish_sync(owner_key, space, run_id, offset, scanned_count)
+                    return
+    except Exception as exc:
+        app.logger.exception("Local photo catalog sync failed (space=%s, offset=%s)", space, offset)
+        photo_catalog.fail_sync(owner_key, space, run_id, str(exc) or "同步失敗")
+    finally:
+        with _photo_catalog_active_lock:
+            _photo_catalog_active.discard((owner_key, space))
 
 
 class SynologyApiError(Exception):
@@ -808,7 +875,7 @@ def nearby_shop_candidates(latitude: float, longitude: float, cache_scope: str) 
                 "limit": 8,
                 "lang": "en",
             },
-            headers={"User-Agent": "Synology-Photo-Tagger/0.4.19"},
+            headers={"User-Agent": "Synology-Photo-Tagger/0.4.20"},
             timeout=(4, 15),
         )
     response.raise_for_status()
@@ -1436,6 +1503,80 @@ def list_photos():
     except SynologyApiError as exc:
         status = 502 if exc.error_code is None else 403
         return jsonify({"ok": False, "error": str(exc), "error_code": exc.error_code}), status
+
+
+@app.get("/api/catalog/status")
+def photo_catalog_status():
+    if not current_nas_session():
+        return jsonify({"ok": False, "error": "請先登入 Synology Photos。"}), 401
+    space = request.args.get("space", "personal")
+    owner_key = tag_job_owner_key()
+    if space not in {"personal", "shared"} or not owner_key:
+        return jsonify({"ok": False, "error": "空間或登入帳號無效。"}), 400
+    return jsonify({"ok": True, **photo_catalog.sync_status(owner_key, space)})
+
+
+@app.post("/api/catalog/sync")
+def start_photo_catalog_sync():
+    nas = current_nas_session()
+    if not nas:
+        return jsonify({"ok": False, "error": "請先登入 Synology Photos。"}), 401
+    body = request.get_json(silent=True)
+    if body is not None and not isinstance(body, dict):
+        return jsonify({"ok": False, "error": "同步參數格式無效。"}), 400
+    space = (body or {}).get("space", "personal")
+    owner_key = tag_job_owner_key()
+    if space not in {"personal", "shared"} or not owner_key:
+        return jsonify({"ok": False, "error": "空間或登入帳號無效。"}), 400
+    token = session.get("nas_session_token")
+    with _photo_catalog_active_lock:
+        if (owner_key, space) in _photo_catalog_active:
+            return jsonify({"ok": False, "error": "此空間的目錄同步正在執行。"}), 409
+        run_id, offset, scanned, started = photo_catalog.begin_sync(owner_key, space)
+        if not started:
+            return jsonify({"ok": False, "error": "此空間的目錄同步已在執行。"}), 409
+        _photo_catalog_active.add((owner_key, space))
+        try:
+            _photo_catalog_executor.submit(run_photo_catalog_sync, owner_key, space, run_id, offset, scanned, token)
+        except RuntimeError:
+            _photo_catalog_active.discard((owner_key, space))
+            photo_catalog.fail_sync(owner_key, space, run_id, "無法啟動目錄同步工作。")
+            return jsonify({"ok": False, "error": "無法啟動目錄同步工作。"}), 503
+    return jsonify({"ok": True, "status": "running", "run_id": run_id, "next_offset": offset, "scanned_count": scanned}), 202
+
+
+@app.get("/api/catalog/query")
+def query_photo_catalog():
+    if not current_nas_session():
+        return jsonify({"ok": False, "error": "請先登入 Synology Photos。"}), 401
+    space = request.args.get("space", "personal")
+    owner_key = tag_job_owner_key()
+    if space not in {"personal", "shared"} or not owner_key:
+        return jsonify({"ok": False, "error": "空間或登入帳號無效。"}), 400
+    try:
+        params = {
+            key: request.args.get(key, "")
+            for key in ("keyword", "date_from", "date_to", "country", "location", "tag", "person", "type")
+        }
+        if params["date_from"] and params["date_to"] and params["date_from"] > params["date_to"]:
+            return jsonify({"ok": False, "error": "開始日期不可晚於結束日期。"}), 400
+        limit = min(100, max(1, int(request.args.get("limit", "48"))))
+        offset = max(0, int(request.args.get("offset", "0")))
+        item_type = params.pop("type")
+        result = photo_catalog.query_catalog(owner_key, space, **params, item_type=item_type, limit=limit, offset=offset)
+    except (ValueError, TypeError):
+        return jsonify({"ok": False, "error": "查詢條件或日期格式無效。"}), 400
+    status = photo_catalog.sync_status(owner_key, space)
+    safe_photos = []
+    for photo in result["photos"]:
+        safe_photos.append({key: photo.get(key) for key in (
+            "photo_id", "filename", "item_type", "taken_time", "filesize", "description",
+            "camera", "lens", "aperture", "exposure_time", "focal_length", "iso",
+            "width", "height", "latitude", "longitude", "country", "state", "county",
+            "city", "district", "town", "village", "route", "landmark", "tags", "people",
+            "thumbnail_cache_key", "thumbnail_unit_id", "thumbnail_ready", "thumbnail_size",
+        )})
+    return jsonify({"ok": True, "space": space, "source": "local", "sync": status, **result, "photos": safe_photos})
 
 
 @app.get("/api/photos/tags")

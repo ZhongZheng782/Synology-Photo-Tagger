@@ -1,8 +1,12 @@
-# Synology Photo Tagger v0.4.19
+# Synology Photo Tagger v0.4.20
 
 A Python web app for browsing Synology Photos, generating photo descriptions and tags, and applying verified updates through the Synology Photos API.
 
 ## Current features
+
+- Builds a resumable local metadata catalog through read-only Synology Photos API calls. Personal/shared spaces and NAS accounts are isolated. Metadata is stored in a separate SQLite file on the persistent Docker volume; original images are not downloaded or stored. Catalog synchronization currently includes photos, not videos.
+- Searches the local catalog by date range, country, location, filename, description, camera, lens, exact tag, and exact Synology Photos person name. Query results show thumbnails proxied live from Synology Photos.
+- Provides a read-only in-container Python query command: `docker exec -it SYNOLOGY-PHOTO-TAGGER python /app/scripts/query_photo_catalog.py --space personal --tag '產品'`. It prompts for the NAS account used to scope the local catalog and does not connect to NAS.
 
 - Connects to Synology Photos through its API.
 - Browses personal and shared spaces with paginated photo previews.
@@ -45,16 +49,16 @@ docker compose up -d
 
 For local development, open `http://localhost:5056/`. Set `SYNOLOGY_URL` to the DSM address reachable from the container. Sign in through the web UI with a Synology account that can access Photos. Production deployment binds the web port to NAS loopback and requires HTTPS through a reverse proxy.
 
-# Synology Photo Tagger v0.4.19
+# Synology Photo Tagger v0.4.20
 
-The provided Compose file uses the versioned `v0.4.19` image tag. In addition to the candidate photo metadata panel, a successfully written job result whose AI tags include `產品` has an expandable nearby-shop section. Expanding it triggers a one-photo lookup only after the server verifies that the photo still has the exact `產品` tag; lookup uses GPS with Photon and OpenStreetMap. Candidates are shown in Traditional Chinese with their original map names, approximate distance, and OSM attribution; they are not treated as purchase records and are not written to Synology Photos. Only shop names and categories are sent to the private MLX server for translation; photos and GPS coordinates are not sent to MLX. Date-range AI jobs send Synology Photos' `time` and `item_type` filters in the top-level JSON fields expected by the Photos API; previous versions sent an unsupported `filter` wrapper, which NAS silently ignored. Daily schedules query only photos taken today and yesterday through the Synology Photos API date filter instead of scanning the photo library from the newest item. The image includes candidate caps up to 1,000 and recurring daily AI tagging with Synology trusted-device authentication. Photo library filters do not become AI job criteria. Docker Hub retains only tags in the `vX.Y.Z` format; the publishing workflow removes floating (`latest`), commit (`sha-*`), and non-three-part version tags. Set `MLX_SERVER_URL` and keep the MLX/Tailscale credentials in host secret files, not `.env`, to enable analysis. `MLX_OCR_ENGINE` selects `baidu` (default) or `glm` for document OCR. Gunicorn runs as a non-root user, the Photos mount remains read-only, the host web binding defaults to loopback, and Compose applies memory, process, and capability limits. Tailscale node state and AI job records plus the session signing key persist in Docker named volumes. For schedules, create the host Fernet key file described in README and set `NAS_DOCKER_ROOT` and `NAS_SCHEDULE_KEY_SOURCE` in `.env` before deployment.
+The provided Compose file uses the versioned `v0.4.20` image tag. It includes a metadata-only catalog that can be synchronized per Photos space, resumed after interruption, and searched locally. Search matching rules and direct Python query examples are documented in the repository README. Results are not a live NAS index until synchronization is complete; thumbnails are fetched through the authenticated Photos API on demand. The image also retains the `產品` nearby OpenStreetMap lookup, daily AI tagging with Synology trusted-device authentication, candidate caps up to 1,000, and automatic Photos API write/readback verification. Docker Hub retains only `vX.Y.Z` image tags. Keep MLX and Tailscale credentials in host secret files, not `.env`. Gunicorn runs as a non-root user, the Photos mount remains read-only, the host web binding defaults to loopback, and Compose applies memory, process, and capability limits. Tailscale state, AI job records, catalog metadata, and the session signing key persist in Docker volumes.
 
 The connection warning is shown only when the browser reaches the app over remote HTTP. HTTPS and loopback access, including a localhost SSH tunnel, do not show it. Production also requires an HTTPS DSM address with certificate verification.
 
 ## Image
 
 ```sh
-docker pull wenchiehlee1020/synology-photo-tagger:v0.4.19
+docker pull wenchiehlee1020/synology-photo-tagger:v0.4.20
 ```
 
 Source: [GitHub](https://github.com/ZhongZheng782/Synology-Photo-Tagger)

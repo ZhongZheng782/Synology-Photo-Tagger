@@ -11,6 +11,7 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='tag-jobs.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='ux-deck-theme.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='nearby-stores.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='photo-catalog.css') }}">
   <!-- Global site tag (gtag.js) - Google Analytics 4 -->
   <script async src="https://www.googletagmanager.com/gtag/js?id=G-913Z6DSVD2"></script>
   <script>
@@ -90,6 +91,29 @@
         </details>
         <div class="photo-list" id="photo-list" aria-live="polite"><div class="photo-empty">登入後載入照片清單。</div></div>
         <div class="photo-pagination"><span id="page-label">—</span><div><button class="secondary-button" id="prev-page" type="button" disabled>上一頁</button><button class="secondary-button" id="next-page" type="button" disabled>下一頁</button></div></div>
+        <details class="photo-catalog" id="photo-catalog">
+          <summary><span><strong>本機 metadata 目錄</strong><small>先同步一次，再用本機資料查詢照片</small></span><span class="catalog-summary-status" id="catalog-summary-status">尚未同步</span></summary>
+          <div class="catalog-body">
+            <p class="catalog-intro">同步會透過 Synology Photos API 讀取照片資訊，保存於容器的持久化 SQLite volume；不下載或保存原圖。個人空間與共享空間分開同步。目錄可在容器重啟後續跑。</p>
+            <div class="catalog-sync-row"><label>同步空間<select id="catalog-space"><option value="personal">個人空間</option><option value="shared">共享空間</option></select></label><button class="primary-button" id="catalog-sync-button" type="button">同步完整目錄 →</button><button class="secondary-button" id="catalog-refresh-status" type="button">更新狀態</button></div>
+            <div class="catalog-sync-status" id="catalog-sync-status" role="status" aria-live="polite">登入後查看此空間的目錄狀態。</div>
+            <div class="catalog-query-heading"><h3>查詢本機目錄</h3><span>條件會同時套用</span></div>
+            <p class="catalog-help">關鍵字搜尋檔名、描述、相機或鏡頭；地點與國家為包含比對（例如「犬山」）；標籤與人物為完整名稱比對。日期依照片拍攝時間。</p>
+            <form class="catalog-query-grid" id="catalog-query-form">
+              <label>關鍵字<input id="catalog-keyword" type="search" placeholder="例如：城堡、iPhone"></label>
+              <label>開始日期<input id="catalog-date-from" type="date"></label>
+              <label>結束日期<input id="catalog-date-to" type="date"></label>
+              <label>國家／地區<input id="catalog-country" type="search" placeholder="例如：日本"></label>
+              <label>地點<input id="catalog-location" type="search" placeholder="例如：犬山市"></label>
+              <label>標籤（完整名稱）<input id="catalog-tag" type="search" placeholder="例如：產品"></label>
+              <label>人物（完整名稱）<input id="catalog-person" type="search" placeholder="例如：WJ Lee"></label>
+              <button class="primary-button catalog-search-button" type="submit">查詢本機目錄 →</button>
+            </form>
+            <div class="catalog-results-heading"><strong id="catalog-result-count">尚未查詢</strong><span id="catalog-partial-note"></span></div>
+            <div class="catalog-results" id="catalog-results" aria-live="polite"><p class="photo-empty">完成至少一次目錄同步後，就能在這裡查詢。</p></div>
+            <div class="catalog-pagination"><button class="secondary-button" id="catalog-prev" type="button" disabled>上一頁</button><button class="secondary-button" id="catalog-next" type="button" disabled>下一頁</button></div>
+          </div>
+        </details>
       </section>
       </section>
 
@@ -198,6 +222,118 @@
     let photoTagsSpace = null;
     let photoTagsRequestId = 0;
     let batchPhotoIds = [];
+    let catalogOffset = 0;
+    let catalogTotal = 0;
+    let catalogPollTimer = null;
+
+    function catalogSpace() { return document.getElementById('catalog-space').value; }
+    function catalogQueryParams(offset = 0) {
+      const params = new URLSearchParams({space: catalogSpace(), limit: '24', offset: String(offset)});
+      for (const [key, id] of Object.entries({keyword:'catalog-keyword', date_from:'catalog-date-from', date_to:'catalog-date-to', country:'catalog-country', location:'catalog-location', tag:'catalog-tag', person:'catalog-person'})) {
+        const value = document.getElementById(id).value.trim();
+        if (value) params.set(key, value);
+      }
+      return params;
+    }
+    function catalogDate(value) {
+      if (!value) return '拍攝時間未知';
+      return new Date(Number(value) * 1000).toLocaleString('zh-TW', {year:'numeric', month:'2-digit', day:'2-digit'});
+    }
+    function renderCatalogStatus(status) {
+      const labels = {empty:'尚未同步', running:'同步中', interrupted:'上次同步中斷', failed:'同步失敗', complete:'同步完成'};
+      const summary = document.getElementById('catalog-summary-status');
+      const details = document.getElementById('catalog-sync-status');
+      const button = document.getElementById('catalog-sync-button');
+      const title = labels[status.status] || '尚未同步';
+      summary.textContent = title;
+      const parts = [`${status.photo_count || 0} 張已收錄`, `已掃描 ${status.scanned_count || 0} 張`];
+      if (status.last_success_at) parts.push(`最近完成 ${catalogDate(status.last_success_at)}`);
+      if (status.error) parts.push(status.error);
+      details.textContent = parts.join(' · ');
+      button.disabled = status.status === 'running';
+      button.textContent = status.status === 'running' ? '同步進行中…' : ['interrupted','failed'].includes(status.status) ? '繼續同步 →' : status.status === 'complete' ? '重新同步完整目錄 →' : '同步完整目錄 →';
+      document.getElementById('catalog-partial-note').textContent = status.status !== 'complete' && status.photo_count ? '目前目錄尚未完整，查詢結果只涵蓋已匯入項目。' : '';
+      if (status.status === 'running') {
+        if (!catalogPollTimer) catalogPollTimer = window.setInterval(() => loadCatalogStatus(true), 2000);
+      } else if (catalogPollTimer) {
+        window.clearInterval(catalogPollTimer);
+        catalogPollTimer = null;
+      }
+    }
+    async function loadCatalogStatus(silent = false) {
+      if (!loginForm.hidden) return;
+      try {
+        const response = await fetch(`/api/catalog/status?space=${encodeURIComponent(catalogSpace())}`);
+        const data = await response.json();
+        if (!response.ok || !data.ok) throw new Error(data.error || '無法讀取目錄狀態。');
+        renderCatalogStatus(data);
+        if (!silent && data.status === 'complete' && catalogTotal) await queryCatalog(catalogOffset);
+      } catch (error) {
+        if (!silent) document.getElementById('catalog-sync-status').textContent = error.message || '無法讀取目錄狀態。';
+      }
+    }
+    async function startCatalogSync() {
+      const button = document.getElementById('catalog-sync-button');
+      button.disabled = true;
+      try {
+        const response = await fetch('/api/catalog/sync', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({space:catalogSpace()})});
+        const data = await response.json();
+        if (!response.ok || !data.ok) throw new Error(data.error || '無法啟動目錄同步。');
+        catalogTotal = 0;
+        document.getElementById('catalog-results').replaceChildren(Object.assign(document.createElement('p'), {className:'photo-empty', textContent:'目錄同步中；完成後即可查詢。'}));
+        await loadCatalogStatus();
+      } catch (error) {
+        document.getElementById('catalog-sync-status').textContent = error.message || '無法啟動目錄同步。';
+        button.disabled = false;
+      }
+    }
+    async function queryCatalog(offset = 0) {
+      const results = document.getElementById('catalog-results');
+      results.replaceChildren(Object.assign(document.createElement('p'), {className:'photo-empty', textContent:'正在查詢本機目錄…'}));
+      try {
+        const params = catalogQueryParams(offset);
+        const response = await fetch(`/api/catalog/query?${params}`);
+        const data = await response.json();
+        if (!response.ok || !data.ok) throw new Error(data.error || '查詢失敗。');
+        catalogOffset = data.offset;
+        catalogTotal = data.total;
+        document.getElementById('catalog-result-count').textContent = `找到 ${data.total.toLocaleString()} 張`;
+        document.getElementById('catalog-partial-note').textContent = data.sync.status !== 'complete' && data.sync.photo_count ? '目錄尚未同步完整，結果僅涵蓋已匯入項目。' : '';
+        results.replaceChildren();
+        if (!data.photos.length) {
+          results.append(Object.assign(document.createElement('p'), {className:'photo-empty', textContent:data.sync.photo_count ? '沒有符合條件的照片。' : '此空間尚無已同步資料，請先同步完整目錄。'}));
+        }
+        for (const photo of data.photos) {
+          const card = document.createElement('article'); card.className = 'catalog-result-card';
+          const thumb = document.createElement('div'); thumb.className = 'catalog-result-thumb';
+          if (photo.thumbnail_cache_key) {
+            const image = document.createElement('img');
+            image.alt = photo.filename || '照片縮圖';
+            image.loading = 'lazy';
+            image.src = `/api/photos/${encodeURIComponent(photo.photo_id)}/thumbnail?${new URLSearchParams({space:catalogSpace(), cache_key:photo.thumbnail_cache_key, size:photo.thumbnail_size || 'm'})}`;
+            image.addEventListener('error', () => { image.remove(); thumb.textContent = '縮圖暫不可用'; }, {once:true});
+            thumb.append(image);
+          } else thumb.textContent = '無縮圖';
+          const content = document.createElement('div'); content.className = 'catalog-result-content';
+          const heading = document.createElement('div'); heading.className = 'catalog-result-title';
+          const name = document.createElement('strong'); name.textContent = photo.filename || '（未命名）';
+          const when = document.createElement('span'); when.textContent = catalogDate(photo.taken_time);
+          heading.append(name, when); content.append(heading);
+          const where = [photo.country, photo.city, photo.district].filter(Boolean).join(' · ');
+          if (where) { const location = document.createElement('p'); location.className='catalog-result-location'; location.textContent=where; content.append(location); }
+          if (photo.description) { const description=document.createElement('p'); description.className='catalog-result-description'; description.textContent=photo.description; content.append(description); }
+          const metadata = [photo.camera, photo.lens, photo.width && photo.height ? `${photo.width} × ${photo.height}` : ''].filter(Boolean).join(' · ');
+          if (metadata) { const meta=document.createElement('p'); meta.className='catalog-result-meta'; meta.textContent=metadata; content.append(meta); }
+          const chips = [...(photo.tags || []), ...(photo.people || [])];
+          if (chips.length) { const row=document.createElement('div'); row.className='catalog-chips'; for (const text of chips) { const chip=document.createElement('span'); chip.textContent=text; row.append(chip); } content.append(row); }
+          card.append(thumb, content); results.append(card);
+        }
+        document.getElementById('catalog-prev').disabled = data.offset <= 0;
+        document.getElementById('catalog-next').disabled = !data.has_more;
+      } catch (error) {
+        results.replaceChildren(Object.assign(document.createElement('p'), {className:'photo-empty', textContent:error.message || '查詢失敗。'}));
+      }
+    }
 
     function showResult(message, kind) {
       resultBox.hidden = false;
@@ -1767,6 +1903,7 @@
         await loadPhotos(0);
         await loadTagJobs();
         await loadTagJobSchedules();
+        await loadCatalogStatus();
       } catch (error) {
         showAuthResult('無法完成登入，請確認服務與 NAS 連線。', 'error');
       } finally {
@@ -1788,11 +1925,24 @@
       document.getElementById('daily-schedule-list').replaceChildren(Object.assign(document.createElement('p'), {className: 'photo-empty', textContent: '登入後載入定期工作。'}));
       if (tagJobPollTimer) window.clearInterval(tagJobPollTimer);
       tagJobPollTimer = null;
+      if (catalogPollTimer) window.clearInterval(catalogPollTimer);
+      catalogPollTimer = null;
       resetPhotoTags();
       showAuthResult('已登出 Synology Photos。', 'success');
     });
 
     document.getElementById('load-photos')?.addEventListener('click', () => loadPhotos(0));
+    document.getElementById('catalog-sync-button')?.addEventListener('click', startCatalogSync);
+    document.getElementById('catalog-refresh-status')?.addEventListener('click', () => loadCatalogStatus());
+    document.getElementById('catalog-space')?.addEventListener('change', () => {
+      catalogOffset = 0; catalogTotal = 0;
+      document.getElementById('catalog-result-count').textContent = '尚未查詢';
+      document.getElementById('catalog-results').replaceChildren(Object.assign(document.createElement('p'), {className:'photo-empty', textContent:'請查詢本機目錄。'}));
+      loadCatalogStatus();
+    });
+    document.getElementById('catalog-query-form')?.addEventListener('submit', event => { event.preventDefault(); queryCatalog(0); });
+    document.getElementById('catalog-prev')?.addEventListener('click', () => queryCatalog(Math.max(0, catalogOffset - 24)));
+    document.getElementById('catalog-next')?.addEventListener('click', () => queryCatalog(catalogOffset + 24));
     document.getElementById('load-tags')?.addEventListener('click', loadPhotoTags);
     document.getElementById('copy-tag-inventory')?.addEventListener('click', copyTagInventory);
     document.getElementById('tag-select')?.addEventListener('change', () => {
@@ -1826,6 +1976,7 @@
       document.getElementById('work-results').hidden = false;
       loadTagJobs();
       loadTagJobSchedules();
+      loadCatalogStatus();
     }
     window.setInterval(() => {
       if (loginForm.hidden) {

@@ -1,6 +1,6 @@
 services:
   synology-photo-tagger:
-    image: wenchiehlee1020/synology-photo-tagger:v0.4.19
+    image: wenchiehlee1020/synology-photo-tagger:v0.4.20
     build: .
     container_name: SYNOLOGY-PHOTO-TAGGER
     restart: unless-stopped
@@ -25,6 +25,7 @@ services:
       MLX_HTTP_PROXY: ${MLX_HTTP_PROXY:-http://127.0.0.1:1055}
       PHOTO_LIBRARY_PATH: /Photos
       TAGGER_DB_PATH: /data/app/photo-tagger.sqlite3
+      PHOTO_CATALOG_DB_PATH: /data/app/photo-catalog.sqlite3
       NAS_SCHEDULE_CREDENTIALS_PATH: /data/app/nas-schedule-credentials.enc
       DEBUG_SHELL: ${DEBUG_SHELL:-false}
       NAS_SCHEDULE_KEY_FILE: /run/secrets/nas-schedule-key
