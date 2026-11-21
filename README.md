@@ -367,7 +367,7 @@ UC-01 至 UC-06 是目標產品需求。下表列出 v0.4.26 的功能狀態及�
 
 ### MVP 啟用方式
 
-- 產生獨立 Token：`python3 -c 'import secrets; print(secrets.token_urlsafe(48))'`，將結果存入 `PHOTO_TAGGER_JOB_API_TOKEN_SOURCE` 指定的 NAS 主機檔案，權限設為 `600`。Compose 以 Docker secret file 掛載；空白／缺少檔案時 API 停用。Token 至少 32 字元，必須與 `PHOTO_TAGGER_API_TOKEN` 不同；不得提交 Git 或寫入日誌。設定 scope 後重建容器。
+- 產生獨立 Token：`python3 -c 'import secrets; print(secrets.token_urlsafe(48))'`，將相同值存入本機 `.env` 的 `PHOTO_TAGGER_JOB_API_TOKEN` 與 Container Manager repo 的 GitHub Actions secret。`.env` 權限應為 `600`；兩處都不得提交 Git 或寫入日誌。部署 workflow 將 Token 寫入 NAS `.env` 後重建容器。Token 至少 32 字元，必須與 `PHOTO_TAGGER_API_TOKEN` 不同；空白／缺少 Token 時 API 停用。
 - 外部 API 固定綁定目前已註冊受信任裝置的 NAS 帳號，MVP 只允許其個人空間。建立與啟動工作前需有完整同步的本機 metadata catalog 及可用的 NAS 受信任工作階段。
 - 目前部署預設授予 `travel:map_lookup`。此 scope 代表使用者同意 API 把明確指定的候選飯店名稱、城市與國家傳送到 Nominatim；不需 Web UI checkbox。每次 API 請求只查指定候選，沿用 24 小時快取、全服務每秒一筆新查詢上限與 attribution，不會背景批次查詢。若要停用地圖查詢，從 `PHOTO_TAGGER_JOB_API_SCOPES` 移除此 scope 並重建容器。
 - API 僅接受 HTTPS 與 `Authorization: Bearer <PHOTO_TAGGER_JOB_API_TOKEN>`，每 Token 每分鐘最多 60 個請求。Metadata Token、無效 Token、scope 不足、跨 owner 的工作 ID 都會被拒絕。API 報告不回傳照片原圖或照片精確 GPS。
