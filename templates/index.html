@@ -118,11 +118,12 @@
       </section>
 
       <section class="module-panel tag-job-panel" id="tag-job-workspace" {% if not logged_in %}hidden{% endif %}>
-        <div class="module-heading"><div><p class="eyebrow">CREATE WORK</p><h2>建立工作</h2></div><span class="module-count">AI 標記與標籤整理</span></div>
+        <div class="module-heading"><div><p class="eyebrow">CREATE WORK</p><h2>建立工作</h2></div><span class="module-count">AI 標記、旅行線索與標籤整理</span></div>
         <p class="module-intro">選擇工作類型後設定條件。AI 標記工作依條件建立獨立候選快照；照片庫目前顯示的清單不會自動帶入。</p>
         <div class="work-type-switcher" role="group" aria-label="工作類型">
           <button class="work-type-button active" type="button" data-work-type="ai">AI 標記</button>
           <button class="work-type-button" type="button" data-work-type="version-upgrade">升級 AI 標記版本</button>
+          <button class="work-type-button" type="button" data-work-type="travel-stay">旅行住宿辨識</button>
           <button class="work-type-button" type="button" data-work-type="tag-replacement">批次更改標籤</button>
         </div>
         <div id="ai-tag-job-form">
@@ -177,6 +178,18 @@
             <div class="batch-tag-result" id="batch-tag-result" hidden role="status" aria-live="polite"></div>
           </section>
         </div>
+        <div id="travel-stay-work-form" hidden>
+          <p class="module-intro">從已完成同步的本機 metadata 目錄建立固定候選快照，再以私有 MLX 逐張辨識住宿線索。此工作唯讀，不會寫入 Photos；拍攝日期不代表入住日期，所有候選都需人工核對。</p>
+          <div class="tag-job-controls tag-job-filter-controls">
+            <label>照片空間<select id="travel-space"><option value="personal">個人空間</option><option value="shared">共享空間</option></select></label>
+            <label>國家（可留空）<input id="travel-country" value="日本" maxlength="80"></label>
+            <label>開始日期<input id="travel-date-from" type="date"></label>
+            <label>結束日期<input id="travel-date-to" type="date"></label>
+            <label>候選照片上限<select id="travel-limit"><option>50</option><option selected>100</option><option>200</option><option>300</option><option>500</option><option>800</option><option>1000</option></select></label>
+            <button class="primary-button" id="create-travel-job" type="button">從本機目錄建立住宿工作</button>
+          </div>
+          <div class="tag-job-notice" id="travel-job-notice" hidden role="status" aria-live="polite"></div>
+        </div>
       </section>
 
       <section class="module-panel tag-job-panel" id="work-results" {% if not logged_in %}hidden{% endif %}>
@@ -190,6 +203,7 @@
           <div class="module-heading"><div><p class="eyebrow">JOB DETAILS</p><h3 id="tag-job-title">標記工作</h3></div><button class="secondary-button" id="close-tag-job" type="button">返回工作清單</button></div>
           <div class="tag-job-report" id="tag-job-report"></div>
           <div class="tag-job-actions" id="tag-job-actions"></div>
+          <div class="travel-stay-summary" id="travel-stay-summary" hidden></div>
           <div class="tag-job-items" id="tag-job-items"></div>
         </section>
       </section>
@@ -546,9 +560,11 @@
     function setBatchWorkType(type) {
       const isReplacement = type === 'tag-replacement';
       const isVersionUpgrade = type === 'version-upgrade';
-      document.getElementById('ai-tag-job-form').hidden = isReplacement || isVersionUpgrade;
+      const isTravel = type === 'travel-stay';
+      document.getElementById('ai-tag-job-form').hidden = isReplacement || isVersionUpgrade || isTravel;
       document.getElementById('version-upgrade-work-form').hidden = !isVersionUpgrade;
       document.getElementById('tag-replacement-work-form').hidden = !isReplacement;
+      document.getElementById('travel-stay-work-form').hidden = !isTravel;
       document.querySelectorAll('[data-work-type]').forEach(button => {
         const active = button.dataset.workType === type;
         button.classList.toggle('active', active);
@@ -1547,6 +1563,12 @@
 
     function tagJobCriteriaLabel(criteria = {}) {
       const filters = [];
+      if (criteria.work_type === 'travel_stay') {
+        if (criteria.country) filters.push(criteria.country);
+        if (criteria.date_from || criteria.date_to) filters.push(`${criteria.date_from || '最早'} 至 ${criteria.date_to || '最新'}`);
+        filters.push('住宿線索');
+        return filters.join(' · ');
+      }
       if (criteria.country === 'japan') filters.push('日本');
       if (criteria.date_from || criteria.date_to) filters.push(`${criteria.date_from || '最早'} 至 ${criteria.date_to || '最新'}`);
       const tags = criteria.tags || (criteria.tag ? [criteria.tag] : []);
@@ -1573,13 +1595,17 @@
           button.type = 'button';
           button.className = `tag-job-row${job.id === activeTagJobId ? ' active' : ''}`;
           const title = document.createElement('strong');
-          title.textContent = `${job.task === 'version_upgrade' ? 'AI 標記版本升級' : 'AI 標記'} · ${tagJobCriteriaLabel(job.criteria)} · ${job.counts.candidates} 張`;
+          const workName = job.criteria?.work_type === 'travel_stay' ? '旅行住宿辨識' : job.task === 'version_upgrade' ? 'AI 標記版本升級' : 'AI 標記';
+          title.textContent = `${workName} · ${tagJobCriteriaLabel(job.criteria)} · ${job.counts.candidates} 張`;
           const detail = document.createElement('small');
           detail.className = 'tag-job-row-meta';
-          detail.textContent = `${job.space === 'personal' ? '個人空間' : '共享空間'} · ${tagJobStatusText(job.status)} · Dry run ${job.counts.dry_run}`;
+          detail.textContent = `${job.space === 'personal' ? '個人空間' : '共享空間'} · ${tagJobStatusText(job.status)}${job.criteria?.work_type === 'travel_stay' ? ` · 已分析 ${job.counts.analyzed}` : ` · Dry run ${job.counts.dry_run}`}`;
           const metrics = document.createElement('div');
           metrics.className = 'tag-job-row-metrics';
-          for (const [label, value] of [['分析', job.counts.analyzed], ['已寫入', job.counts.written]]) {
+          const metricsToShow = job.criteria?.work_type === 'travel_stay'
+            ? [['分析', job.counts.analyzed], ['已確認線索', job.counts.accepted]]
+            : [['分析', job.counts.analyzed], ['已寫入', job.counts.written]];
+          for (const [label, value] of metricsToShow) {
             const metric = document.createElement('span');
             metric.append(document.createTextNode(`${label} `));
             const number = document.createElement('strong');
@@ -1632,19 +1658,29 @@
           const analysis = item.analysis;
           const outcome = document.createElement('p');
           outcome.className = 'tag-job-decision';
-          outcome.textContent = 'AI 描述與標籤建議';
+          const isTravel = job.criteria?.work_type === 'travel_stay';
+          outcome.textContent = isTravel ? '住宿線索分析（待人工核對）' : 'AI 描述與標籤建議';
           content.append(outcome);
-          if (analysis.description) {
+          if (isTravel) {
+            if (photo.trip_group_id) { const trip = document.createElement('small'); trip.textContent = `旅行群組：${photo.trip_group_id}`; content.append(trip); }
+            const evidenceNames = {hotel_sign:'飯店招牌', hotel_exterior:'飯店外觀', guest_room:'客房', bathroom:'浴室', hotel_breakfast:'飯店早餐', key_card:'房卡', booking_document:'訂房文件', view_from_room:'房內窗景', non_lodging:'非住宿線索', uncertain:'無法辨識'};
+            const evidence = document.createElement('p'); evidence.textContent = `證據類型：${evidenceNames[analysis.lodging_evidence] || '無法辨識'}`; content.append(evidence);
+            if (analysis.hotel_name) { const hotel = document.createElement('strong'); hotel.textContent = `飯店候選：${analysis.hotel_name}`; content.append(hotel); }
+            if (analysis.city) { const city = document.createElement('small'); city.textContent = `城市線索：${analysis.city}`; content.append(city); }
+            if (analysis.description) { const desc = document.createElement('p'); desc.textContent = analysis.description; content.append(desc); }
+            if (analysis.reason) { const reason = document.createElement('small'); reason.textContent = analysis.reason; content.append(reason); }
+            const reviewState = document.createElement('small'); reviewState.textContent = item.review === 'accepted' ? '人工狀態：已確認為有效線索' : item.review === 'rejected' ? '人工狀態：已排除' : '人工狀態：待確認'; content.append(reviewState);
+          } else if (analysis.description) {
             const desc = document.createElement('p');
             desc.textContent = analysis.description;
             content.append(desc);
           }
-          if (analysis.tags?.length) {
+          if (!isTravel && analysis.tags?.length) {
             const tags = document.createElement('small');
             tags.textContent = `建議標籤：${analysis.tags.join('、')}`;
             content.append(tags);
           }
-          if (analysis.evidence?.length) {
+          if (!isTravel && analysis.evidence?.length) {
             const evidence = document.createElement('small');
             evidence.textContent = `可見線索：${analysis.evidence.join('、')}`;
             content.append(evidence);
@@ -1747,7 +1783,18 @@
           error.textContent = item.error;
           content.append(error);
         }
-        if (item.status === 'analyzed') {
+        if (item.status === 'analyzed' && job.criteria?.work_type === 'travel_stay') {
+          const controls = document.createElement('div'); controls.className = 'tag-job-review-buttons';
+          for (const [decision, label] of [['accepted', '確認為住宿線索'], ['rejected', '排除此線索']]) {
+            const button = document.createElement('button'); button.type = 'button';
+            button.className = decision === 'accepted' ? 'primary-button' : 'secondary-button';
+            button.textContent = item.review === decision ? (decision === 'accepted' ? '已確認分類' : '已排除') : label;
+            button.disabled = item.review === decision;
+            button.addEventListener('click', async () => { try { await setJobReview(job.id, photo.id, decision); } catch (error) { setTagJobNotice(error.message, true); } });
+            controls.append(button);
+          }
+          content.append(controls);
+        } else if (item.status === 'analyzed') {
           const controls = document.createElement('div');
           controls.className = 'tag-job-review-buttons';
           const tagSelect = document.createElement('select');
@@ -1810,15 +1857,149 @@
       }, 2000);
     }
 
+    function renderTravelStaySummary(job, groups = [], candidates = []) {
+      const container = document.getElementById('travel-stay-summary');
+      container.replaceChildren();
+      const isTravel = job.criteria?.work_type === 'travel_stay';
+      container.hidden = !isTravel;
+      if (!isTravel) return;
+      const heading = document.createElement('h4'); heading.textContent = '旅行群組與住宿候選'; container.append(heading);
+      const intro = document.createElement('p'); intro.textContent = '群組依同一國家、相鄰拍攝日期不超過 14 日產生建議；它只是整理線索，請人工核對。公開地圖只在你勾選同意並按查詢時使用。'; container.append(intro);
+      for (const group of groups) {
+        const section = document.createElement('section'); section.className = 'travel-trip-group';
+        const title = document.createElement('h5');
+        const range = group.photo_date_range?.from ? `${group.photo_date_range.from} 至 ${group.photo_date_range.to}` : '拍攝日期未知';
+        title.textContent = `${group.trip_label || '旅行群組'} · ${group.country || '國家未知'} · ${range} · ${group.photo_count || 0} 張`;
+        section.append(title);
+        const rule = document.createElement('small'); rule.textContent = group.grouping_rule || ''; section.append(rule);
+        const tripFields = document.createElement('div'); tripFields.className = 'travel-trip-edit';
+        const tripName = document.createElement('input'); tripName.maxLength = 100; tripName.value = group.trip_label || ''; tripName.setAttribute('aria-label', '旅行群組名稱');
+        const tripState = document.createElement('select');
+        for (const [value, label] of [['needs_review','待確認群組'],['confirmed','確認為同一趟'],['excluded','排除此群組']]) tripState.append(new Option(label, value));
+        tripState.value = group.review_status || 'needs_review';
+        const tripSave = document.createElement('button'); tripSave.type = 'button'; tripSave.className = 'secondary-button'; tripSave.textContent = '儲存群組核對';
+        const tripNotice = document.createElement('small');
+        tripSave.addEventListener('click', async () => {
+          tripSave.disabled = true;
+          try {
+            await tagJobRequest(`/api/travel-jobs/${encodeURIComponent(job.id)}/trips/${encodeURIComponent(group.trip_group_id)}`, {
+              method: 'PATCH', headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({trip_label: tripName.value, review_status: tripState.value}),
+            });
+            tripNotice.textContent = '旅行群組核對已儲存。';
+          } catch (error) { tripNotice.textContent = error.message || '無法儲存群組核對。'; }
+          finally { tripSave.disabled = false; }
+        });
+        tripFields.append(tripName, tripState, tripSave, tripNotice); section.append(tripFields);
+        const groupCandidates = candidates.filter(candidate => candidate.trip_group_id === group.trip_group_id);
+        if (!groupCandidates.length) {
+          const empty = document.createElement('p'); empty.textContent = '尚無具名飯店候選；逐張照片分析完成後會在這裡顯示線索。'; section.append(empty);
+        }
+        for (const candidate of groupCandidates) {
+          const card = document.createElement('article'); card.className = 'travel-hotel-candidate';
+          const name = document.createElement('input'); name.maxLength = 160; name.value = candidate.hotel_name || candidate.source_hotel_name || ''; name.setAttribute('aria-label', '飯店候選名稱');
+          const currentName = document.createElement('input'); currentName.maxLength = 160; currentName.value = candidate.current_hotel_name || ''; currentName.placeholder = '現名（人工查證後填寫）'; currentName.setAttribute('aria-label', '飯店現名');
+          const alternateNames = document.createElement('input'); alternateNames.maxLength = 500; alternateNames.value = candidate.alternate_names || ''; alternateNames.placeholder = '其他名稱／日文名（以分號分隔）'; alternateNames.setAttribute('aria-label', '飯店其他名稱');
+          const address = document.createElement('input'); address.maxLength = 500; address.value = candidate.address || ''; address.placeholder = '核對後地址'; address.setAttribute('aria-label', '飯店地址');
+          const officialUrl = document.createElement('input'); officialUrl.type = 'url'; officialUrl.maxLength = 500; officialUrl.value = candidate.official_url || ''; officialUrl.placeholder = '飯店官網 URL'; officialUrl.setAttribute('aria-label', '飯店官網');
+          const activeFrom = document.createElement('input'); activeFrom.inputMode = 'numeric'; activeFrom.maxLength = 4; activeFrom.value = candidate.active_from || ''; activeFrom.placeholder = '開始年份'; activeFrom.setAttribute('aria-label', '開始營業年份');
+          const activeTo = document.createElement('input'); activeTo.inputMode = 'numeric'; activeTo.maxLength = 4; activeTo.value = candidate.active_to || ''; activeTo.placeholder = '結束年份'; activeTo.setAttribute('aria-label', '結束營業年份');
+          const historyNotes = document.createElement('textarea'); historyNotes.maxLength = 1000; historyNotes.value = candidate.history_notes || ''; historyNotes.placeholder = '更名或歷史來源備註'; historyNotes.setAttribute('aria-label', '飯店歷史備註');
+          const city = document.createElement('input'); city.maxLength = 120; city.value = candidate.city || ''; city.placeholder = '城市（可修正公開地圖搜尋範圍）'; city.setAttribute('aria-label', '住宿城市');
+          const evidence = document.createElement('small'); evidence.textContent = `照片證據 ${candidate.evidence_photo_ids?.length || 0} 張 · ${[...(candidate.evidence_types || [])].join('、')}`;
+          const dates = document.createElement('div'); dates.className = 'travel-stay-dates';
+          const checkIn = document.createElement('input'); checkIn.type = 'date'; checkIn.value = candidate.check_in || ''; checkIn.setAttribute('aria-label', '入住日期（人工確認）');
+          const checkOut = document.createElement('input'); checkOut.type = 'date'; checkOut.value = candidate.check_out || ''; checkOut.setAttribute('aria-label', '退房日期（人工確認）');
+          const stayStatus = document.createElement('select');
+          for (const [value, label] of [['needs_review','住宿待確認'],['confirmed','人工確認住宿'],['excluded','排除此住宿候選']]) stayStatus.append(new Option(label, value));
+          stayStatus.value = candidate.review_status || 'needs_review';
+          dates.append(checkIn, checkOut, stayStatus);
+          const consentLabel = document.createElement('label'); consentLabel.className = 'travel-map-consent';
+          const consent = document.createElement('input'); consent.type = 'checkbox';
+          const consentText = document.createElement('span'); consentText.textContent = '同意將飯店名稱、城市與國家送到 OpenStreetMap 查詢（不傳照片或精確 GPS）。';
+          consentLabel.append(consent, consentText);
+          const mapButton = document.createElement('button'); mapButton.type = 'button'; mapButton.className = 'secondary-button'; mapButton.textContent = '查詢公開地圖候選';
+          const mapStatus = document.createElement('small'); mapStatus.textContent = '地圖候選只協助核對地名，不代表實際入住。';
+          const mapSelect = document.createElement('select'); mapSelect.setAttribute('aria-label', 'OpenStreetMap 候選地點');
+          let selectedPlace = candidate.selected_place;
+          let mapResults = candidate.map_results || [];
+          const mapLinks = document.createElement('div'); mapLinks.className = 'travel-map-links';
+          const showPlaceLinks = place => {
+            mapLinks.replaceChildren();
+            if (place?.osm_url) { const link = document.createElement('a'); link.href = place.osm_url; link.target = '_blank'; link.rel = 'noopener noreferrer'; link.textContent = '開啟 OpenStreetMap 地點'; mapLinks.append(link); }
+            if (place?.website) { const site = document.createElement('a'); site.href = place.website; site.target = '_blank'; site.rel = 'noopener noreferrer'; site.textContent = '查看地圖資料所列網站（自行核對是否為官網）'; mapLinks.append(site); }
+          };
+          const clearMapSelection = reason => { selectedPlace = null; mapSelect.value = ''; showPlaceLinks(null); mapStatus.textContent = reason; };
+          name.addEventListener('input', () => clearMapSelection('飯店名稱已變更，請重新查詢地圖候選。'));
+          city.addEventListener('input', () => clearMapSelection('城市已變更，請重新查詢地圖候選。'));
+          const fillMapResults = results => {
+            mapResults = results;
+            mapSelect.replaceChildren(new Option(results.length ? '選擇地圖地點' : '沒有地圖結果', ''));
+            for (const place of results) {
+              const label = `${place.name || place.display_name || '未命名地點'} · ${place.display_name || ''}`;
+              mapSelect.append(new Option(label, place.place_id));
+            }
+            if (selectedPlace?.place_id) mapSelect.value = selectedPlace.place_id;
+          };
+          fillMapResults(mapResults);
+          showPlaceLinks(selectedPlace);
+          const attribution = document.createElement('a'); attribution.href = 'https://www.openstreetmap.org/copyright';
+          attribution.target = '_blank'; attribution.rel = 'noopener noreferrer'; attribution.textContent = '© OpenStreetMap contributors · 查詢規則';
+          const policyLink = document.createElement('a'); policyLink.href = 'https://operations.osmfoundation.org/policies/nominatim/';
+          policyLink.target = '_blank'; policyLink.rel = 'noopener noreferrer'; policyLink.textContent = 'Nominatim 使用政策';
+          mapSelect.addEventListener('change', () => showPlaceLinks(mapResults.find(place => place.place_id === mapSelect.value)));
+          mapButton.addEventListener('click', async () => {
+            if (!consent.checked) { mapStatus.textContent = '請先勾選同意，才會向公開服務傳送飯店名稱與城市。'; return; }
+            mapButton.disabled = true; mapStatus.textContent = '正在查詢 OpenStreetMap…';
+            try {
+              const result = await tagJobRequest(`/api/travel-jobs/${encodeURIComponent(job.id)}/candidates/${encodeURIComponent(candidate.candidate_key)}/map-search`, {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({consent: true, hotel_name: name.value, city: city.value}),
+              });
+              selectedPlace = null;
+              fillMapResults(result.results || []);
+              showPlaceLinks((result.results || []).find(place => place.place_id === mapSelect.value));
+              mapStatus.textContent = `${result.privacy} ${result.attribution}`;
+            } catch (error) { mapStatus.textContent = error.message || '公開地圖查詢失敗。'; }
+            finally { consent.checked = false; mapButton.disabled = false; }
+          });
+          const save = document.createElement('button'); save.type = 'button'; save.className = 'primary-button'; save.textContent = '儲存飯店與日期核對';
+          const saveStatus = document.createElement('small');
+          save.addEventListener('click', async () => {
+            save.disabled = true;
+            try {
+              await tagJobRequest(`/api/travel-jobs/${encodeURIComponent(job.id)}/candidates/${encodeURIComponent(candidate.candidate_key)}`, {
+                method: 'PATCH', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({hotel_name: name.value, current_hotel_name: currentName.value, alternate_names: alternateNames.value, city: city.value,
+                                      address: address.value, official_url: officialUrl.value, active_from: activeFrom.value,
+                                      active_to: activeTo.value, history_notes: historyNotes.value,
+                                      check_in: checkIn.value, check_out: checkOut.value,
+                                      review_status: stayStatus.value, selected_place_id: mapSelect.value || null}),
+              });
+              saveStatus.textContent = '住宿候選核對已儲存。';
+            } catch (error) { saveStatus.textContent = error.message || '無法儲存住宿核對。'; }
+            finally { save.disabled = false; }
+          });
+          card.append(name, currentName, alternateNames, city, address, officialUrl, activeFrom, activeTo, historyNotes, evidence, dates, consentLabel, mapButton, mapStatus, mapSelect, mapLinks, attribution, policyLink, save, saveStatus);
+          section.append(card);
+        }
+        container.append(section);
+      }
+    }
+
     function renderTagJob(payload) {
       const {job, items} = payload;
       activeTagJobId = job.id;
       const detail = document.getElementById('tag-job-detail');
       detail.hidden = false;
-      document.getElementById('tag-job-title').textContent = `AI 標記工作 · ${tagJobCriteriaLabel(job.criteria)} · ${job.id.slice(0, 8)}`;
+      const isTravel = job.criteria?.work_type === 'travel_stay';
+      document.getElementById('tag-job-title').textContent = `${isTravel ? '旅行住宿辨識' : 'AI 標記工作'} · ${tagJobCriteriaLabel(job.criteria)} · ${job.id.slice(0, 8)}`;
       const report = document.getElementById('tag-job-report');
       const counts = job.counts;
-      report.textContent = `狀態：${tagJobStatusText(job.status)}　候選 ${counts.candidates}　候選排除已有 AI 輸出 ${job.skipped_processed_count || 0} 張　排除已標記新版 ${job.skipped_version_count || 0} 張　已分析 ${counts.analyzed}　已略過 ${counts.skipped}　分析失敗 ${counts.failed}　需核對 ${counts.needs_review}　已寫入 ${counts.written}　Dry run ${counts.dry_run}`;
+      report.textContent = isTravel
+        ? `狀態：${tagJobStatusText(job.status)}　候選 ${counts.candidates}　已分析 ${counts.analyzed}　待確認 ${items.filter(item => item.status === 'analyzed' && item.review === 'pending').length}　已確認 ${items.filter(item => item.review === 'accepted').length}　已排除 ${items.filter(item => item.review === 'rejected').length}　失敗 ${counts.failed}　唯讀`
+        : `狀態：${tagJobStatusText(job.status)}　候選 ${counts.candidates}　候選排除已有 AI 輸出 ${job.skipped_processed_count || 0} 張　排除已標記新版 ${job.skipped_version_count || 0} 張　已分析 ${counts.analyzed}　已略過 ${counts.skipped}　分析失敗 ${counts.failed}　需核對 ${counts.needs_review}　已寫入 ${counts.written}　Dry run ${counts.dry_run}`;
+      renderTravelStaySummary(job, payload.travel_groups || [], payload.travel_candidates || []);
       if (!job.snapshot_complete) {
         const limitNote = document.createElement('p');
         limitNote.className = 'tag-job-warning';
@@ -1847,7 +2028,7 @@
         job.status === 'ready' ||
         (['interrupted', 'failed'].includes(job.status) && items.some(item => item.status === 'pending'))
       )) {
-        addAction('分析尚未完成的照片', 'primary', async () => {
+        addAction(isTravel ? '辨識住宿線索' : '分析尚未完成的照片', 'primary', async () => {
           try {
             await tagJobRequest(`/api/tag-jobs/${encodeURIComponent(job.id)}/analyze`, {method: 'POST'});
             setTagJobNotice('分析工作已排入佇列。');
@@ -1864,8 +2045,21 @@
           } catch (error) { setTagJobNotice(error.message, true); }
         });
       }
+      if (isTravel) {
+        for (const [format, label] of [['md', '下載 Markdown 住宿報告'], ['json', '下載 JSON 住宿報告']]) {
+          addAction(label, 'secondary', async () => {
+            try {
+              const response = await fetch(`/api/travel-jobs/${encodeURIComponent(job.id)}/report?format=${format}`);
+              if (!response.ok) throw new Error('下載住宿報告失敗。');
+              const body = await response.blob();
+              const link = document.createElement('a'); link.href = URL.createObjectURL(body);
+              link.download = `travel-stay-${job.id.slice(0, 8)}.${format}`; link.click(); URL.revokeObjectURL(link.href);
+            } catch (error) { setTagJobNotice(error.message, true); }
+          });
+        }
+      }
       const acceptedUnwritten = items.filter(item => item.review === 'accepted' && item.status === 'analyzed').length;
-      if (acceptedUnwritten > 0 && !['preparing', 'analyzing', 'writing', 'undoing', 'written'].includes(job.status)) {
+      if (!isTravel && acceptedUnwritten > 0 && !['preparing', 'analyzing', 'writing', 'undoing', 'written'].includes(job.status)) {
         const impact = document.createElement('p');
         impact.className = 'tag-job-warning';
         const acceptedTags = [...new Set(items.filter(item => item.review === 'accepted' && item.status === 'analyzed').map(item => item.reviewed_tag || '購物'))];
@@ -1942,6 +2136,27 @@
         await openTagJob(payload.job_id);
         startTagJobPolling(payload.job_id);
       } catch (error) { setTagJobNotice(error.message, true); }
+      finally { button.disabled = false; }
+    });
+    document.getElementById('create-travel-job')?.addEventListener('click', async event => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      const notice = document.getElementById('travel-job-notice');
+      notice.hidden = false; notice.textContent = '正在從完整的本機目錄建立固定候選快照…';
+      try {
+        const payload = await tagJobRequest('/api/travel-jobs', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            space: document.getElementById('travel-space').value,
+            country: document.getElementById('travel-country').value.trim(),
+            date_from: document.getElementById('travel-date-from').value,
+            date_to: document.getElementById('travel-date-to').value,
+            max_candidates: Number(document.getElementById('travel-limit').value),
+          }),
+        });
+        notice.textContent = `已固定 ${payload.candidate_count} 張候選照片（本機目錄符合 ${payload.source_count} 張）；尚未分析或寫入。`;
+        await loadTagJobs(); await openTagJob(payload.job_id);
+      } catch (error) { notice.textContent = error.message || '無法建立住宿工作。'; }
       finally { button.disabled = false; }
     });
     document.getElementById('load-job-tags')?.addEventListener('click', loadTagJobTags);

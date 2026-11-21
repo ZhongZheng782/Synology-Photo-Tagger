@@ -51,7 +51,7 @@ API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 NAS_SESSION_TTL_SECONDS = 12 * 60 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.4.23")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.4.25")
 PHOTO_TAGGER_AI_PROFILE_VERSION = 1
 PHOTO_TAGGER_AI_VERSION_TAG = f"Photo Tagger AI v{PHOTO_TAGGER_AI_PROFILE_VERSION}"
 PHOTO_TAGGER_AI_VERSION_PATTERN = re.compile(r"^Photo Tagger AI v([0-9]+)$", re.IGNORECASE)
@@ -93,6 +93,11 @@ task_relevant 必須是 true 或 false；confidence 為 0 至 1 的數字。只�
 
 
 
+TRAVEL_STAY_PROMPT = """請用繁體中文判斷照片是否提供旅行住宿的直接線索，只輸出一個合法 JSON 物件，不要加 Markdown 或其他文字：
+{"lodging_evidence":"hotel_sign|hotel_exterior|guest_room|bathroom|hotel_breakfast|key_card|booking_document|view_from_room|non_lodging|uncertain","hotel_name":null,"city":null,"description":"只描述可見的住宿線索","reason":"簡短說明判斷依據"}
+只根據本張照片可見內容。不得把附近街道、景點、餐廳、商場或路過飯店當成住宿證據；單張 GPS、窗景或外觀不足以確認入住。若畫面沒有住宿線索，使用 non_lodging；無法判斷則使用 uncertain。只抽取清晰可見的飯店名稱，不輸出房號、訂單／預約編號、姓名、電話、證件、QR 碼或其他文件原文。不要推測入住或退房日期；照片拍攝日期不等於住宿日期。不要輸出信心分數。"""
+
+
 @dataclass
 class NasSession:
     client: requests.Session
@@ -130,6 +135,10 @@ _nearby_store_cache: dict[tuple[str, float, float], tuple[float, list[dict]]] = 
 _nearby_store_cache_lock = threading.Lock()
 _photon_request_lock = threading.Lock()
 _photon_last_request_at = 0.0
+_travel_nominatim_cache: dict[str, tuple[float, list[dict]]] = {}
+_travel_nominatim_lock = threading.Lock()
+_travel_nominatim_request_lock = threading.Lock()
+_travel_nominatim_last_request_at = 0.0
 _photo_analysis_jobs: dict[str, dict] = {}
 _photo_analysis_jobs_lock = threading.Lock()
 PHOTO_ANALYSIS_JOB_TTL_SECONDS = 900
@@ -180,6 +189,7 @@ def initialize_tag_job_db() -> None:
     with tag_job_db() as db:
         db.executescript(
             """
+
             CREATE TABLE IF NOT EXISTS tag_jobs (
                 id TEXT PRIMARY KEY,
                 owner_key TEXT NOT NULL,
@@ -212,6 +222,41 @@ def initialize_tag_job_db() -> None:
                 error TEXT,
                 updated_at REAL NOT NULL,
                 PRIMARY KEY(job_id, photo_id)
+            );
+            CREATE TABLE IF NOT EXISTS travel_stay_candidate_reviews (
+                job_id TEXT NOT NULL REFERENCES tag_jobs(id) ON DELETE CASCADE,
+                candidate_key TEXT NOT NULL,
+                trip_group_id TEXT NOT NULL,
+                source_hotel_name TEXT NOT NULL,
+                hotel_name TEXT,
+                current_hotel_name TEXT,
+                alternate_names TEXT,
+                city TEXT,
+                address TEXT,
+                official_url TEXT,
+                active_from TEXT,
+                active_to TEXT,
+                history_notes TEXT,
+                trip_label TEXT,
+                check_in TEXT,
+                check_out TEXT,
+                map_results_json TEXT NOT NULL DEFAULT '[]',
+                map_query_hotel_name TEXT,
+                map_query_city TEXT,
+                map_query_text TEXT,
+                map_cached_at REAL,
+                selected_place_json TEXT,
+                review_status TEXT NOT NULL DEFAULT 'needs_review',
+                updated_at REAL NOT NULL,
+                PRIMARY KEY(job_id, candidate_key)
+            );
+            CREATE TABLE IF NOT EXISTS travel_stay_trip_reviews (
+                job_id TEXT NOT NULL REFERENCES tag_jobs(id) ON DELETE CASCADE,
+                trip_group_id TEXT NOT NULL,
+                trip_label TEXT,
+                review_status TEXT NOT NULL DEFAULT 'needs_review',
+                updated_at REAL NOT NULL,
+                PRIMARY KEY(job_id, trip_group_id)
             );
             CREATE INDEX IF NOT EXISTS tag_job_items_status
                 ON tag_job_items(job_id, status, review);
@@ -269,6 +314,14 @@ def initialize_tag_job_db() -> None:
         item_columns = {row["name"] for row in db.execute("PRAGMA table_info(tag_job_items)").fetchall()}
         if "reviewed_tag" not in item_columns:
             db.execute("ALTER TABLE tag_job_items ADD COLUMN reviewed_tag TEXT")
+        travel_review_columns = {row["name"] for row in db.execute("PRAGMA table_info(travel_stay_candidate_reviews)").fetchall()}
+        for column, definition in {
+            "current_hotel_name": "TEXT", "alternate_names": "TEXT", "city": "TEXT", "address": "TEXT",
+            "official_url": "TEXT", "active_from": "TEXT", "active_to": "TEXT", "history_notes": "TEXT",
+            "map_query_hotel_name": "TEXT", "map_query_city": "TEXT", "map_query_text": "TEXT", "map_cached_at": "REAL",
+        }.items():
+            if column not in travel_review_columns:
+                db.execute(f"ALTER TABLE travel_stay_candidate_reviews ADD COLUMN {column} {definition}")
         # A container restart must never silently resume a mutating operation.
         db.execute(
             "UPDATE tag_jobs SET status='interrupted', error='服務重新啟動；請檢查項目狀態後再繼續。', updated_at=? "
@@ -2202,6 +2255,446 @@ def get_tag_job(db: sqlite3.Connection, owner_key: str, job_id: str) -> sqlite3.
     ).fetchone()
 
 
+def travel_candidate_priority(photo: dict) -> int:
+    tags = " ".join(photo.get("tags") or []).casefold()
+    description = str(photo.get("description") or "").casefold()
+    lodging_terms = ("飯店", "酒店", "旅館", "住宿", "客房", "房間", "浴室", "房卡", "旅宿", "hotel", "inn", "ryokan", "宿泊", "ホテル")
+    score = sum(3 for term in lodging_terms if term.casefold() in tags)
+    score += sum(2 for term in lodging_terms if term.casefold() in description)
+    if not description.strip():
+        score += 1
+    if photo.get("latitude") is not None and photo.get("longitude") is not None:
+        score += 1
+    return score
+
+
+def safe_travel_analysis(raw_output: str) -> dict:
+    text = raw_output.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE)
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("住宿分析回應不是有效 JSON。")
+    parsed = json.loads(text[start:end + 1])
+    if not isinstance(parsed, dict):
+        raise ValueError("住宿分析回應格式無效。")
+    allowed = {"hotel_sign", "hotel_exterior", "guest_room", "bathroom", "hotel_breakfast", "key_card", "booking_document", "view_from_room", "non_lodging", "uncertain"}
+    evidence = parsed.get("lodging_evidence")
+    if evidence not in allowed:
+        evidence = "uncertain"
+    def clean(value, limit):
+        if not isinstance(value, str):
+            return None
+        value = re.sub(r"[\r\n\t]+", " ", value).strip()
+        return value[:limit] or None
+    hotel_name = clean(parsed.get("hotel_name"), 160)
+    if hotel_name:
+        hotel_name = re.sub(r"(?i)\b(?:room|room no\.?|reservation|booking|order|phone|tel)\s*[:#-]?\s*[A-Z0-9-]{2,}\b", "", hotel_name)
+        hotel_name = re.sub(r"\b[A-Z0-9-]{9,}\b", "", hotel_name).strip(" -,:：") or None
+    # Persist only minimal lodging fields; never persist raw model output/OCR.
+    return {
+        "lodging_evidence": evidence,
+        "hotel_name": hotel_name,
+        "city": clean(parsed.get("city"), 100),
+        "description": None if evidence == "booking_document" else clean(parsed.get("description"), 500),
+        "reason": None if evidence == "booking_document" else clean(parsed.get("reason"), 500),
+        "evidence_status": "needs_review",
+    }
+
+
+def travel_photo_day(photo: dict) -> date | None:
+    value = photo.get("time")
+    try:
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        timestamp = float(value)
+        if timestamp > 100_000_000_000:
+            timestamp /= 1000
+        return datetime.fromtimestamp(timestamp, timezone.utc).date()
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+def build_travel_group_payload(job_id: str, items: list[dict]) -> dict:
+    dated = []
+    undated = []
+    for item in items:
+        photo = dict(item.get("photo") or {})
+        taken_day = travel_photo_day(photo)
+        enriched = {**item, "photo": photo, "photo_date": taken_day.isoformat() if taken_day else None}
+        if taken_day:
+            dated.append((taken_day, enriched))
+        else:
+            undated.append(enriched)
+    dated.sort(key=lambda entry: (entry[0], int(entry[1].get("photo", {}).get("id") or 0)))
+    episodes: list[list[tuple[date, dict]]] = []
+    for entry in dated:
+        day, item = entry
+        country = canonical_travel_country(item.get("photo", {}).get("country"))
+        if not episodes:
+            episodes.append([entry])
+            continue
+        previous_day, previous_item = episodes[-1][-1]
+        previous_country = canonical_travel_country(previous_item.get("photo", {}).get("country"))
+        if (day - previous_day).days > 14 or (country and previous_country and country != previous_country):
+            episodes.append([entry])
+        else:
+            episodes[-1].append(entry)
+    groups = []
+    enriched_items = []
+    for index, episode in enumerate(episodes, start=1):
+        first_day = episode[0][0]
+        last_day = episode[-1][0]
+        country = next((str(item.get("photo", {}).get("country")) for _, item in episode if item.get("photo", {}).get("country")), None)
+        group_id = "trip-" + hashlib.sha256(f"{job_id}:{index}:{first_day.isoformat()}".encode("utf-8")).hexdigest()[:10]
+        group_items = []
+        for _, item in episode:
+            photo = {**item["photo"], "trip_group_id": group_id, "photo_date": item["photo_date"]}
+            enriched = {**item, "photo": photo, "trip_group_id": group_id}
+            group_items.append(enriched)
+            enriched_items.append(enriched)
+        groups.append({"trip_group_id": group_id, "trip_label": f"旅行群組 {index}", "country": country,
+                       "photo_date_range": {"from": first_day.isoformat(), "to": last_day.isoformat()},
+                       "grouping_rule": "同一國家且相鄰拍攝日期間隔不超過 14 日；僅為排序線索，待人工核對。",
+                       "photo_count": len(group_items), "photo_ids": [item.get("photo", {}).get("id") for item in group_items]})
+    for index, item in enumerate(undated, start=1):
+        group_id = "trip-unknown-" + hashlib.sha256(f"{job_id}:{item.get('photo', {}).get('id')}".encode("utf-8")).hexdigest()[:8]
+        photo = {**item["photo"], "trip_group_id": group_id, "photo_date": None}
+        enriched = {**item, "photo": photo, "trip_group_id": group_id, "photo_date": None}
+        enriched_items.append(enriched)
+        groups.append({"trip_group_id": group_id, "trip_label": f"日期未知 {index}", "country": photo.get("country"),
+                       "photo_date_range": {"from": None, "to": None}, "grouping_rule": "照片缺少拍攝日期，未與其他照片合併。",
+                       "photo_count": 1, "photo_ids": [photo.get("id")]})
+    candidates = {}
+    for item in enriched_items:
+        analysis = item.get("analysis") or {}
+        hotel_name = analysis.get("hotel_name")
+        if not hotel_name or item.get("review") == "rejected":
+            continue
+        trip_group_id = item["trip_group_id"]
+        normalized_name = hotel_name.strip().casefold()
+        candidate_key = hashlib.sha256(f"{trip_group_id}:{normalized_name}".encode("utf-8")).hexdigest()[:24]
+        candidate = candidates.setdefault(candidate_key, {"candidate_key": candidate_key, "trip_group_id": trip_group_id,
+                                                            "source_hotel_name": hotel_name, "hotel_name": hotel_name,
+                                                            "city": analysis.get("city") or item.get("photo", {}).get("city"),
+                                                            "evidence_photo_ids": [], "evidence_types": [], "items": [],
+                                                            "review_status": "needs_review"})
+        candidate["evidence_photo_ids"].append(item.get("photo", {}).get("id"))
+        candidate["evidence_types"].append(analysis.get("lodging_evidence"))
+        candidate["items"].append(item)
+    for candidate in candidates.values():
+        candidate["evidence_photo_ids"] = list(dict.fromkeys(candidate["evidence_photo_ids"]))
+        candidate["evidence_types"] = sorted(set(value for value in candidate["evidence_types"] if value))
+        candidate_dates = sorted(item["photo_date"] for item in candidate["items"] if item.get("photo_date"))
+        candidate["photo_date_range"] = {"from": candidate_dates[0] if candidate_dates else None,
+                                          "to": candidate_dates[-1] if candidate_dates else None}
+        candidate["stay_dates"] = {"check_in": None, "check_out": None}
+        candidate["hotel_name_source"] = "AI 從照片可見線索辨識；尚未核對公開來源"
+        candidate["address"] = None
+        candidate["source_url"] = None
+        candidate["reason"] = "按旅行時間群組與辨識名稱彙整；不代表實際入住。"
+        candidate.pop("items", None)
+    return {"groups": groups, "items": enriched_items, "candidates": list(candidates.values())}
+
+
+def canonical_travel_country(value) -> str:
+    country = str(value or "").strip().casefold()
+    if country in {"日本", "日本國", "日本国", "japan"}:
+        return "japan"
+    return country
+
+
+@app.post("/api/travel-jobs")
+def create_travel_job():
+    if not current_nas_session():
+        return jsonify({"ok": False, "error": "請先登入 Synology Photos。"}), 401
+    owner_key = tag_job_owner_key()
+    body = request.get_json(silent=True)
+    if not owner_key or not isinstance(body, dict):
+        return jsonify({"ok": False, "error": "工作條件格式無效。"}), 400
+    space = body.get("space", "personal")
+    country = body.get("country", "")
+    date_from, date_to = body.get("date_from", ""), body.get("date_to", "")
+    try:
+        limit = int(body.get("max_candidates", 100))
+        parsed_from = date.fromisoformat(date_from) if date_from else None
+        parsed_to = date.fromisoformat(date_to) if date_to else None
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "日期或候選上限格式無效。"}), 400
+    if space not in {"personal", "shared"} or not isinstance(country, str) or len(country) > 80:
+        return jsonify({"ok": False, "error": "空間或國家條件無效。"}), 400
+    if not country.strip() and not date_from and not date_to:
+        return jsonify({"ok": False, "error": "請至少指定國家或日期區間，避免掃描整個照片庫。"}), 400
+    if parsed_from and parsed_to and parsed_from > parsed_to:
+        return jsonify({"ok": False, "error": "開始日期不可晚於結束日期。"}), 400
+    if limit not in {50, 100, 200, 300, 500, 800, 1000}:
+        return jsonify({"ok": False, "error": "候選照片上限無效。"}), 400
+    catalog_status = photo_catalog.sync_status(owner_key, space)
+    if catalog_status.get("status") != "complete":
+        return jsonify({"ok": False, "error": "請先完成所選空間的本機 metadata 目錄同步；住宿工作只查詢完整的本機目錄。", "catalog": catalog_status}), 409
+    try:
+        gathered_by_id, source_truncated = {}, False
+        country_terms = [country]
+        if country.strip().casefold() in {"日本", "日本國", "日本国", "japan"}:
+            country_terms = ["日本", "Japan", "日本国", "日本國"]
+        for country_term in country_terms:
+            offset = 0
+            while len(gathered_by_id) < 10_000:
+                page = photo_catalog.query_catalog(owner_key, space, country=country_term, date_from=date_from, date_to=date_to,
+                                                   limit=min(100, 10_000 - len(gathered_by_id)), offset=offset)
+                for photo in page["photos"]:
+                    gathered_by_id[photo["photo_id"]] = photo
+                offset += len(page["photos"])
+                if not page["has_more"]:
+                    break
+                if len(gathered_by_id) >= 10_000:
+                    source_truncated = True
+            if source_truncated:
+                break
+        gathered = list(gathered_by_id.values())
+        gathered.sort(key=lambda photo: (-travel_candidate_priority(photo), -(photo.get("taken_time") or 0), -photo["photo_id"]))
+        selected = gathered[:limit]
+    except (ValueError, TypeError, sqlite3.Error):
+        app.logger.exception("Could not query catalog for travel stay job")
+        return jsonify({"ok": False, "error": "無法查詢本機 metadata 目錄。"}), 500
+    job_id, now = uuid.uuid4().hex, time.time()
+    criteria = {"work_type": "travel_stay", "country": country, "date_from": date_from, "date_to": date_to,
+                "max_candidates": limit, "source_count": len(gathered), "source_truncated": source_truncated,
+                "catalog_last_success_at": catalog_status.get("last_success_at")}
+    with tag_job_db() as db:
+        db.execute(
+            "INSERT INTO tag_jobs(id,owner_key,space,task,criteria_json,status,snapshot_complete,candidate_count,scanned_count,error,created_at,updated_at) VALUES(?,?,?,?,?,'ready',?,?,?,?,?,?)",
+            (job_id, owner_key, space, "travel_stay", json.dumps(criteria, ensure_ascii=False), int(not source_truncated), len(selected), len(gathered),
+             "本機目錄符合照片超過 10,000 張；候選優先從最新 10,000 張中選取，請縮小日期或國家條件。" if source_truncated else None, now, now),
+        )
+        for photo in selected:
+            snapshot = {"id": photo["photo_id"], "filename": photo["filename"], "time": photo.get("taken_time"),
+                       "thumbnail_ready": bool(photo.get("thumbnail_ready")), "thumbnail_cache_key": photo.get("thumbnail_cache_key"),
+                       "thumbnail_unit_id": photo.get("thumbnail_unit_id"), "thumbnail_size": photo.get("thumbnail_size") or "m",
+                       "country": photo.get("country"), "city": photo.get("city"), "latitude": photo.get("latitude"),
+                       "longitude": photo.get("longitude"), "tags": photo.get("tags", []),
+                       "candidate_reason": "依既有標籤／描述、GPS 與描述完整度排序納入；此排序不是住宿證據。"}
+            db.execute("INSERT INTO tag_job_items(job_id,photo_id,photo_json,updated_at) VALUES(?,?,?,?)",
+                       (job_id, photo["photo_id"], json.dumps(snapshot, ensure_ascii=False), now))
+    return jsonify({"ok": True, "job_id": job_id, "status": "ready", "candidate_count": len(selected),
+                    "source_count": len(gathered), "snapshot_complete": not source_truncated}), 201
+
+
+def find_travel_candidate(db: sqlite3.Connection, owner_key: str, job_id: str, candidate_key: str):
+    job = get_tag_job(db, owner_key, job_id)
+    if not job or json.loads(job["criteria_json"]).get("work_type") != "travel_stay":
+        return None, None, None
+    rows = db.execute("SELECT photo_id,photo_json,status,review,analysis_json FROM tag_job_items WHERE job_id=?", (job_id,)).fetchall()
+    items = [{"photo": json.loads(row["photo_json"]), "status": row["status"], "review": row["review"],
+              "analysis": json.loads(row["analysis_json"]) if row["analysis_json"] else None} for row in rows]
+    travel = build_travel_group_payload(job_id, items)
+    candidate = next((item for item in travel["candidates"] if item["candidate_key"] == candidate_key), None)
+    if not candidate:
+        return job, None, None
+    db.execute(
+        "INSERT OR IGNORE INTO travel_stay_candidate_reviews(job_id,candidate_key,trip_group_id,source_hotel_name,updated_at) VALUES(?,?,?,?,?)",
+        (job_id, candidate["candidate_key"], candidate["trip_group_id"], candidate["source_hotel_name"], time.time()),
+    )
+    saved = db.execute("SELECT * FROM travel_stay_candidate_reviews WHERE job_id=? AND candidate_key=?",
+                       (job_id, candidate_key)).fetchone()
+    return job, candidate, saved
+
+
+def nominatim_search(query_text: str, referer: str) -> tuple[list[dict] | None, str | None]:
+    global _travel_nominatim_last_request_at
+    cache_key = query_text.casefold()
+    with _travel_nominatim_request_lock:
+        with _travel_nominatim_lock:
+            cached = _travel_nominatim_cache.get(cache_key)
+            if cached and time.time() - cached[0] < 24 * 60 * 60:
+                return cached[1], None
+            delay = 1.0 - (time.monotonic() - _travel_nominatim_last_request_at)
+        if delay > 0:
+            time.sleep(delay)
+        with _travel_nominatim_lock:
+            _travel_nominatim_last_request_at = time.monotonic()
+    try:
+        response = requests.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": query_text, "format": "jsonv2", "addressdetails": 1,
+                    "extratags": 1, "namedetails": 1, "limit": 5},
+            headers={"User-Agent": f"SynologyPhotoTagger/{APP_VERSION} (+https://github.com/ZhongZheng782/Synology-Photo-Tagger)",
+                     "Referer": referer},
+            timeout=(5, 12),
+        )
+        response.raise_for_status()
+        raw_results = response.json()
+        if not isinstance(raw_results, list):
+            return None, "OpenStreetMap 回傳格式無效。"
+        results = []
+        for place in raw_results[:5]:
+            if not isinstance(place, dict):
+                continue
+            osm_type = place.get("osm_type")
+            osm_id = place.get("osm_id")
+            osm_url = f"https://www.openstreetmap.org/{osm_type}/{osm_id}" if osm_type in {"node", "way", "relation"} and str(osm_id).isdigit() else None
+            namedetails = place.get("namedetails") if isinstance(place.get("namedetails"), dict) else {}
+            extra = place.get("extratags") if isinstance(place.get("extratags"), dict) else {}
+            website = extra.get("website") or extra.get("contact:website")
+            if not isinstance(website, str) or urlsplit(website).scheme not in {"http", "https"}:
+                website = None
+            results.append({
+                "place_id": str(place.get("place_id") or ""),
+                "name": namedetails.get("name") or place.get("name"),
+                "display_name": str(place.get("display_name") or "")[:500],
+                "category": str(place.get("category") or "")[:80],
+                "type": str(place.get("type") or "")[:80],
+                "latitude": place.get("lat"), "longitude": place.get("lon"),
+                "osm_url": osm_url, "website": website,
+            })
+        with _travel_nominatim_lock:
+            _travel_nominatim_cache[cache_key] = (time.time(), results)
+        return results, None
+    except (requests.exceptions.RequestException, ValueError):
+        return None, "OpenStreetMap 公開地圖查詢失敗，請稍後再試。"
+
+
+@app.patch("/api/travel-jobs/<job_id>/trips/<trip_group_id>")
+def update_travel_trip(job_id: str, trip_group_id: str):
+    if not current_nas_session():
+        return jsonify({"ok": False, "error": "請先登入 Synology Photos。"}), 401
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"ok": False, "error": "旅行群組更新格式無效。"}), 400
+    owner_key = tag_job_owner_key() or ""
+    with tag_job_db() as db:
+        job = get_tag_job(db, owner_key, job_id)
+        if not job or json.loads(job["criteria_json"]).get("work_type") != "travel_stay":
+            return jsonify({"ok": False, "error": "找不到旅行住宿工作。"}), 404
+        rows = db.execute("SELECT photo_json FROM tag_job_items WHERE job_id=?", (job_id,)).fetchall()
+        items = [{"photo": json.loads(row["photo_json"]), "analysis": None} for row in rows]
+        known_groups = {group["trip_group_id"] for group in build_travel_group_payload(job_id, items)["groups"]}
+        if trip_group_id not in known_groups:
+            return jsonify({"ok": False, "error": "找不到此旅行群組。"}), 404
+        label = body.get("trip_label", "")
+        decision = body.get("review_status", "needs_review")
+        if not isinstance(label, str) or len(label) > 100 or not isinstance(decision, str) or decision not in {"needs_review", "confirmed", "excluded"}:
+            return jsonify({"ok": False, "error": "旅行名稱或核對狀態格式無效。"}), 400
+        db.execute("UPDATE travel_stay_trip_reviews SET trip_label=?,review_status=?,updated_at=? WHERE job_id=? AND trip_group_id=?",
+                   (re.sub(r"[\r\n\t]+", " ", label).strip() or None, decision, time.time(), job_id, trip_group_id))
+    return jsonify({"ok": True, "trip_label": label.strip(), "review_status": decision})
+
+
+@app.post("/api/travel-jobs/<job_id>/candidates/<candidate_key>/map-search")
+def search_travel_candidate_map(job_id: str, candidate_key: str):
+    if not current_nas_session():
+        return jsonify({"ok": False, "error": "請先登入 Synology Photos。"}), 401
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or body.get("consent") is not True:
+        return jsonify({"ok": False, "error": "請先同意將候選飯店名稱與城市傳送至 OpenStreetMap 查詢。"}), 400
+    owner_key = tag_job_owner_key() or ""
+    with tag_job_db() as db:
+        job, candidate, saved = find_travel_candidate(db, owner_key, job_id, candidate_key)
+        if not job or not candidate:
+            return jsonify({"ok": False, "error": "找不到此住宿候選。"}), 404
+        requested_name = body.get("hotel_name")
+        if requested_name is not None and (not isinstance(requested_name, str) or len(requested_name) > 160):
+            return jsonify({"ok": False, "error": "飯店名稱格式無效。"}), 400
+        hotel_name = (requested_name or (saved["hotel_name"] if saved and saved["hotel_name"] else candidate["source_hotel_name"])).strip()
+        requested_city = body.get("city")
+        if requested_city is not None and (not isinstance(requested_city, str) or len(requested_city) > 120):
+            return jsonify({"ok": False, "error": "城市格式無效。"}), 400
+        city = (requested_city if requested_city is not None else (saved["city"] if saved and saved["city"] else candidate.get("city"))) or ""
+        city = city.strip()
+        country = json.loads(job["criteria_json"]).get("country") or ""
+        query_text = ", ".join(value for value in (hotel_name, city, country) if value)
+        if not query_text:
+            return jsonify({"ok": False, "error": "缺少可查詢的飯店名稱或地點。"}), 400
+        saved_results = json.loads(saved["map_results_json"] or "[]") if saved else []
+        cache_is_fresh = bool(saved and saved["map_query_text"] == query_text.casefold()
+                              and saved["map_cached_at"] and time.time() - saved["map_cached_at"] < 24 * 60 * 60)
+    if cache_is_fresh:
+        results, error = saved_results, None
+    else:
+        results, error = nominatim_search(query_text, request.url_root)
+        if error:
+            return jsonify({"ok": False, "error": error}), 429 if "每秒最多一次" in error else 502
+    with tag_job_db() as db:
+        db.execute("UPDATE travel_stay_candidate_reviews SET map_results_json=?,map_query_hotel_name=?,map_query_city=?,map_query_text=?,map_cached_at=?,updated_at=? WHERE job_id=? AND candidate_key=?",
+                   (json.dumps(results, ensure_ascii=False), hotel_name, city, query_text.casefold(), time.time(), time.time(), job_id, candidate_key))
+    return jsonify({"ok": True, "query": query_text, "results": results,
+                    "attribution": "© OpenStreetMap contributors · Nominatim",
+                    "attribution_url": "https://www.openstreetmap.org/copyright",
+                    "privacy": "僅傳送候選飯店名稱、城市與國家；不傳照片、精確 GPS 或 NAS 帳號。"})
+
+
+@app.patch("/api/travel-jobs/<job_id>/candidates/<candidate_key>")
+def update_travel_candidate(job_id: str, candidate_key: str):
+    if not current_nas_session():
+        return jsonify({"ok": False, "error": "請先登入 Synology Photos。"}), 401
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"ok": False, "error": "住宿候選更新格式無效。"}), 400
+    owner_key = tag_job_owner_key() or ""
+    with tag_job_db() as db:
+        job, candidate, saved = find_travel_candidate(db, owner_key, job_id, candidate_key)
+        if not job or not candidate:
+            return jsonify({"ok": False, "error": "找不到此住宿候選。"}), 404
+        def clean_text(value, maximum):
+            if value is None:
+                return ""
+            if not isinstance(value, str) or len(value) > maximum:
+                raise ValueError("文字欄位格式無效或過長。")
+            return re.sub(r"[\r\n\t]+", " ", value).strip()
+        try:
+            hotel_name = clean_text(body.get("hotel_name", saved["hotel_name"] if saved else candidate["source_hotel_name"]), 160)
+            current_name = clean_text(body.get("current_hotel_name", saved["current_hotel_name"] if saved else ""), 160)
+            alternate_names = clean_text(body.get("alternate_names", saved["alternate_names"] if saved else ""), 500)
+            city = clean_text(body.get("city", saved["city"] if saved else candidate.get("city") or ""), 120)
+            address = clean_text(body.get("address", saved["address"] if saved else ""), 500)
+            official_url = clean_text(body.get("official_url", saved["official_url"] if saved else ""), 500)
+            active_from = clean_text(body.get("active_from", saved["active_from"] if saved else ""), 4)
+            active_to = clean_text(body.get("active_to", saved["active_to"] if saved else ""), 4)
+            history_notes = clean_text(body.get("history_notes", saved["history_notes"] if saved else ""), 1000)
+            trip_label = clean_text(body.get("trip_label", saved["trip_label"] if saved else ""), 100)
+            check_in = clean_text(body.get("check_in", saved["check_in"] if saved else ""), 10)
+            check_out = clean_text(body.get("check_out", saved["check_out"] if saved else ""), 10)
+            decision = body.get("review_status", saved["review_status"] if saved else "needs_review")
+            if not isinstance(decision, str) or decision not in {"needs_review", "confirmed", "excluded"}:
+                raise ValueError("人工核對狀態無效。")
+            parsed_check_in = date.fromisoformat(check_in) if check_in else None
+            parsed_check_out = date.fromisoformat(check_out) if check_out else None
+            if parsed_check_in and parsed_check_out and parsed_check_in > parsed_check_out:
+                raise ValueError("入住日期不可晚於退房日期。")
+            for year in (active_from, active_to):
+                if year and not re.fullmatch(r"(?:18|19|20|21)\d{2}", year):
+                    raise ValueError("營業年份請輸入四位數西元年。")
+            if active_from and active_to and int(active_from) > int(active_to):
+                raise ValueError("營業開始年份不可晚於結束年份。")
+            if official_url:
+                parsed_url = urlsplit(official_url)
+                if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc or parsed_url.username or parsed_url.password:
+                    raise ValueError("官網連結必須是有效的 HTTP 或 HTTPS 網址。")
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        selected_place = None
+        selected_place_id = body.get("selected_place_id")
+        if selected_place_id:
+            map_rows = db.execute("SELECT map_results_json,map_query_hotel_name,map_query_city FROM travel_stay_candidate_reviews WHERE job_id=? AND candidate_key=?",
+                                  (job_id, candidate_key)).fetchone()
+            map_results = json.loads(map_rows["map_results_json"] or "[]") if map_rows else []
+            if (not map_rows or (map_rows["map_query_hotel_name"] or "").casefold() != hotel_name.casefold()
+                    or (map_rows["map_query_city"] or "").casefold() != city.casefold()):
+                return jsonify({"ok": False, "error": "飯店名稱或城市有變更，請用目前資料重新查詢地圖候選。"}), 400
+            selected_place = next((place for place in map_results if place.get("place_id") == str(selected_place_id)), None)
+            if selected_place is None:
+                return jsonify({"ok": False, "error": "請先查詢公開地圖，並選擇其中一筆結果。"}), 400
+        db.execute(
+            "UPDATE travel_stay_candidate_reviews SET hotel_name=?,current_hotel_name=?,alternate_names=?,city=?,address=?,official_url=?,active_from=?,active_to=?,history_notes=?,trip_label=?,check_in=?,check_out=?,selected_place_json=?,review_status=?,updated_at=? WHERE job_id=? AND candidate_key=?",
+            (hotel_name or candidate["source_hotel_name"], current_name or None, alternate_names or None, city or None, address or None,
+             official_url or None, active_from or None, active_to or None, history_notes or None, trip_label or None, check_in or None, check_out or None,
+             json.dumps(selected_place, ensure_ascii=False) if selected_place else None, decision, time.time(), job_id, candidate_key),
+        )
+    return jsonify({"ok": True, "review_status": decision, "selected_place": selected_place})
+
+
 def tag_job_detail_payload(db: sqlite3.Connection, owner_key: str, job_id: str) -> dict | None:
     job = get_tag_job(db, owner_key, job_id)
     if job is None:
@@ -2219,7 +2712,49 @@ def tag_job_detail_payload(db: sqlite3.Connection, owner_key: str, job_id: str) 
             "write": json.loads(row["write_json"]) if row["write_json"] else None,
             "undo_status": row["undo_status"], "error": row["error"],
         })
-    return {"job": tag_job_summary(db, job), "items": items}
+    result = {"job": tag_job_summary(db, job), "items": items}
+    criteria = json.loads(job["criteria_json"])
+    if criteria.get("work_type") == "travel_stay":
+        travel = build_travel_group_payload(job_id, items)
+        for group in travel["groups"]:
+            db.execute("INSERT OR IGNORE INTO travel_stay_trip_reviews(job_id,trip_group_id,updated_at) VALUES(?,?,?)",
+                       (job_id, group["trip_group_id"], time.time()))
+            trip_review = db.execute("SELECT trip_label,review_status FROM travel_stay_trip_reviews WHERE job_id=? AND trip_group_id=?",
+                                     (job_id, group["trip_group_id"])).fetchone()
+            if trip_review:
+                group["trip_label"] = trip_review["trip_label"] or group["trip_label"]
+                group["review_status"] = trip_review["review_status"]
+        for candidate in travel["candidates"]:
+            db.execute(
+                "INSERT OR IGNORE INTO travel_stay_candidate_reviews(job_id,candidate_key,trip_group_id,source_hotel_name,updated_at) VALUES(?,?,?,?,?)",
+                (job_id, candidate["candidate_key"], candidate["trip_group_id"], candidate["source_hotel_name"], time.time()),
+            )
+            saved = db.execute(
+                "SELECT * FROM travel_stay_candidate_reviews WHERE job_id=? AND candidate_key=?",
+                (job_id, candidate["candidate_key"]),
+            ).fetchone()
+            if saved:
+                candidate.update({
+                    "hotel_name": saved["hotel_name"] or candidate["hotel_name"],
+                    "current_hotel_name": saved["current_hotel_name"],
+                    "alternate_names": saved["alternate_names"], "city": saved["city"] or candidate.get("city"), "address": saved["address"],
+                    "official_url": saved["official_url"], "active_from": saved["active_from"],
+                    "active_to": saved["active_to"], "history_notes": saved["history_notes"],
+                    "trip_label": saved["trip_label"],
+                    "check_in": saved["check_in"], "check_out": saved["check_out"],
+                    "selected_place": json.loads(saved["selected_place_json"]) if saved["selected_place_json"] else None,
+                    "map_results": json.loads(saved["map_results_json"] or "[]"),
+                    "review_status": saved["review_status"],
+                })
+                candidate["stay_dates"] = {"check_in": saved["check_in"], "check_out": saved["check_out"]}
+                candidate["source_url"] = candidate["selected_place"].get("osm_url") if candidate.get("selected_place") else None
+        result["travel_groups"] = travel["groups"]
+        result["travel_candidates"] = travel["candidates"]
+        # Keep photo card snapshots associated with the same suggested trip grouping.
+        by_photo_id = {item.get("photo", {}).get("id"): item.get("photo", {}).get("trip_group_id") for item in travel["items"]}
+        for item in result["items"]:
+            item["photo"]["trip_group_id"] = by_photo_id.get(item["photo"].get("id"))
+    return result
 
 
 def photo_taken_date(photo: dict) -> date | None:
@@ -2922,7 +3457,7 @@ def run_tag_job_analysis(job_id: str, owner_key: str, nas_token: str) -> None:
                     (time.time(), job_id, photo_id),
                 )
             query = urlencode({
-                "space": space, "task": "photo",
+                "space": space, "task": "travel_stay" if criteria.get("work_type") == "travel_stay" else "photo",
                 "cache_key": photo.get("thumbnail_cache_key") or "",
                 "unit_id": photo.get("thumbnail_unit_id") or photo_id,
             })
@@ -2940,6 +3475,22 @@ def run_tag_job_analysis(job_id: str, owner_key: str, nas_token: str) -> None:
                     )
                 continue
             analysis = payload.get("analysis") if isinstance(payload.get("analysis"), dict) else {}
+            if criteria.get("work_type") == "travel_stay":
+                try:
+                    safe_result = safe_travel_analysis(str(payload.get("output") or ""))
+                except (ValueError, TypeError, json.JSONDecodeError) as exc:
+                    with tag_job_db() as db:
+                        db.execute(
+                            "UPDATE tag_job_items SET status='failed', error=?, updated_at=? WHERE job_id=? AND photo_id=?",
+                            (str(exc)[:300], time.time(), job_id, photo_id),
+                        )
+                    continue
+                with tag_job_db() as db:
+                    db.execute(
+                        "UPDATE tag_job_items SET status='analyzed', review='pending', analysis_json=?, error=NULL, updated_at=? WHERE job_id=? AND photo_id=?",
+                        (json.dumps(safe_result, ensure_ascii=False), time.time(), job_id, photo_id),
+                    )
+                continue
             if not analysis or (not analysis.get("description") and not analysis.get("tags")):
                 with tag_job_db() as db:
                     db.execute(
@@ -3017,6 +3568,7 @@ def run_tag_job_analysis(job_id: str, owner_key: str, nas_token: str) -> None:
             status = (
                 "analyzing" if counts["queued"] or counts["running"] or counts["writing"] else
                 "needs_attention" if counts["failed"] or counts["uncertain"] else
+                "review" if criteria.get("work_type") == "travel_stay" else
                 "dry_run" if dry_run else "written"
             )
             error = "部分照片需要核對；可安全重跑分析失敗項目。" if counts["failed"] or counts["uncertain"] else None
@@ -3083,7 +3635,6 @@ def review_tag_job_item(job_id: str, photo_id: int):
     if decision not in {"accepted", "rejected", "pending"}:
         return jsonify({"ok": False, "error": "複核狀態無效。"}), 400
     owner_key = tag_job_owner_key() or ""
-    nas = current_nas_session()
     with tag_job_db() as db:
         job = get_tag_job(db, owner_key, job_id)
         item = db.execute("SELECT status FROM tag_job_items WHERE job_id=? AND photo_id=?", (job_id, photo_id)).fetchone() if job else None
@@ -3092,6 +3643,13 @@ def review_tag_job_item(job_id: str, photo_id: int):
         if item["status"] != "analyzed":
             return jsonify({"ok": False, "error": "請先完成此照片的分析。"}), 409
         space = job["space"]
+        criteria = json.loads(job["criteria_json"])
+        if criteria.get("work_type") == "travel_stay":
+            db.execute("UPDATE tag_job_items SET review=?, reviewed_tag=NULL, updated_at=? WHERE job_id=? AND photo_id=?",
+                       (decision, time.time(), job_id, photo_id))
+            db.execute("UPDATE tag_jobs SET status='review', updated_at=? WHERE id=?", (time.time(), job_id))
+            return jsonify({"ok": True, "decision": decision})
+    nas = current_nas_session()
     reviewed_tag = body.get("tag", "購物") if decision == "accepted" else None
     if decision == "accepted":
         if not isinstance(reviewed_tag, str) or not reviewed_tag.strip() or len(reviewed_tag.strip()) > 64:
@@ -3110,6 +3668,83 @@ def review_tag_job_item(job_id: str, photo_id: int):
         db.execute("UPDATE tag_job_items SET review=?, reviewed_tag=?, updated_at=? WHERE job_id=? AND photo_id=?", (decision, reviewed_tag, time.time(), job_id, photo_id))
         db.execute("UPDATE tag_jobs SET status='review', updated_at=? WHERE id=?", (time.time(), job_id))
     return jsonify({"ok": True, "decision": decision, "tag": reviewed_tag})
+
+
+@app.get("/api/travel-jobs/<job_id>/report")
+def download_travel_job_report(job_id: str):
+    if not current_nas_session():
+        return jsonify({"ok": False, "error": "請先登入 Synology Photos。"}), 401
+    owner_key = tag_job_owner_key() or ""
+    with tag_job_db() as db:
+        job = get_tag_job(db, owner_key, job_id)
+        if not job or json.loads(job["criteria_json"]).get("work_type") != "travel_stay":
+            return jsonify({"ok": False, "error": "找不到旅行住宿工作。"}), 404
+        criteria = json.loads(job["criteria_json"])
+        detail = tag_job_detail_payload(db, owner_key, job_id)
+    photos = []
+    for item in detail["items"]:
+        photo = item["photo"]
+        photos.append({"photo_id": photo.get("id"), "filename": photo.get("filename"),
+                       "photo_date": photo.get("photo_date"), "trip_group_id": photo.get("trip_group_id"),
+                       "country": photo.get("country"), "city": photo.get("city"),
+                       "latitude": photo.get("latitude"), "longitude": photo.get("longitude"),
+                       "status": item["status"], "review": item["review"], "analysis": item["analysis"]})
+    report = {"schema_version": 2, "work_type": "travel_stay", "job_id": job_id, "space": job["space"],
+              "criteria": criteria, "trip_groups": detail.get("travel_groups", []),
+              "lodging_candidates": detail.get("travel_candidates", []), "photos": photos,
+              "attribution": "© OpenStreetMap contributors",
+              "license": "OpenStreetMap data is available under the Open Database License (ODbL).",
+              "note": "住宿候選、入住日期與旅行群組需人工核對。OpenStreetMap 結果只提供地點線索，不證明實際入住。"}
+    if request.args.get("format") == "md":
+        lines = ["# 旅行住宿線索報告", "", f"- 工作：`{job_id}`", f"- 空間：{job['space']}",
+                 f"- 範圍：{criteria.get('country') or '未指定國家'} · {criteria.get('date_from') or '最早'} 至 {criteria.get('date_to') or '最新'}",
+                 "", "> 此報告彙整照片線索，不代表已確認入住；住宿日期未由拍攝日期推定。", ""]
+        for group in report["trip_groups"]:
+            lines.extend([f"## {group['trip_label']} · {group['photo_date_range']['from'] or '日期未知'} 至 {group['photo_date_range']['to'] or '日期未知'}",
+                          "", f"- 群組核對：{group.get('review_status', 'needs_review')}",
+                          f"- 分組規則：{group.get('grouping_rule', '')}", ""])
+            trip_candidates = [candidate for candidate in report["lodging_candidates"] if candidate["trip_group_id"] == group["trip_group_id"]]
+            for candidate in trip_candidates:
+                place = candidate.get("selected_place") or {}
+                lines.extend([f"### {candidate.get('hotel_name') or candidate['source_hotel_name']}", "",
+                              f"- 照片辨識名稱：{candidate['source_hotel_name']}",
+                              f"- 現名：{candidate.get('current_hotel_name') or '待核對'}",
+                              f"- 其他名稱：{candidate.get('alternate_names') or '未提供'}",
+                              f"- 城市：{candidate.get('city') or '待核對'}",
+                              f"- 地址：{candidate.get('address') or '待核對'}",
+                              f"- 住宿核對：{candidate.get('review_status', 'needs_review')}",
+                              f"- 入住／退房日期：{candidate.get('check_in') or '待確認'} ／ {candidate.get('check_out') or '待確認'}",
+                              f"- 營業年份：{candidate.get('active_from') or '未知'} 至 {candidate.get('active_to') or '未知'}",
+                              f"- 地圖候選：{place.get('display_name') or '未選擇'}"])
+                if place.get("osm_url"):
+                    lines.append(f"- OpenStreetMap：{place['osm_url']}")
+                if candidate.get("official_url"):
+                    lines.append(f"- 官網／核對來源：{candidate['official_url']}")
+                elif place.get("website"):
+                    lines.append(f"- 地圖資料所列網站（尚待核對）：{place['website']}")
+                if candidate.get("history_notes"):
+                    lines.append(f"- 歷史備註：{candidate['history_notes']}")
+                lines.append("- 證據照片：")
+                for photo_id in candidate["evidence_photo_ids"]:
+                    photo = next((entry for entry in photos if entry["photo_id"] == photo_id), {})
+                    lines.append(f"  - {photo.get('filename', photo_id)}（ID {photo_id}；拍攝日 {photo.get('photo_date') or '未知'}）")
+                lines.append("")
+        unnamed = [item for item in photos if item.get("analysis") and not item["analysis"].get("hotel_name")]
+        if not report["lodging_candidates"]:
+            lines.append("目前沒有可辨識飯店名稱的住宿候選。")
+        if unnamed:
+            lines.extend(["## 尚未歸入具名住宿的照片線索", ""])
+            for item in unnamed:
+                lines.append(f"- {item['filename']}（ID {item['photo_id']}，{item.get('photo_date') or '拍攝日期未知'}；線索：{item['analysis'].get('lodging_evidence')}；人工狀態：{item['review']}）")
+                if item["analysis"].get("description"):
+                    lines.append(f"  - {item['analysis']['description']}")
+        lines.extend(["", "地圖資料 attribution：© OpenStreetMap contributors (https://www.openstreetmap.org/copyright)"])
+        response = Response("\n".join(lines), mimetype="text/markdown; charset=utf-8")
+        response.headers["Content-Disposition"] = f'attachment; filename="travel-stay-{job_id[:8]}.md"'
+        return response
+    response = jsonify(report)
+    response.headers["Content-Disposition"] = f'attachment; filename="travel-stay-{job_id[:8]}.json"'
+    return response
 
 
 def call_job_write_route(nas_token: str, space: str, photo_id: int, tag_name: str) -> dict:
@@ -3208,6 +3843,8 @@ def write_accepted_tag_job_items(job_id: str):
         job = get_tag_job(db, owner_key, job_id)
         if not job:
             return jsonify({"ok": False, "error": "找不到此標記工作。"}), 404
+        if json.loads(job["criteria_json"]).get("work_type") == "travel_stay":
+            return jsonify({"ok": False, "error": "旅行住宿工作為唯讀，不支援 Photos API 寫入。"}), 409
         if job["status"] in {"preparing", "analyzing", "writing", "undoing"}:
             return jsonify({"ok": False, "error": "工作仍在處理中。"}), 409
         accepted = db.execute("SELECT COUNT(*) FROM tag_job_items WHERE job_id=? AND review='accepted' AND status='analyzed'", (job_id,)).fetchone()[0]
@@ -3293,6 +3930,8 @@ def undo_tag_job(job_id: str):
         job = get_tag_job(db, owner_key, job_id)
         if not job:
             return jsonify({"ok": False, "error": "找不到此標記工作。"}), 404
+        if json.loads(job["criteria_json"]).get("work_type") == "travel_stay":
+            return jsonify({"ok": False, "error": "旅行住宿工作為唯讀，不支援 Photos API 撤銷。"}), 409
         if job["status"] in {"preparing", "analyzing", "writing", "undoing"}:
             return jsonify({"ok": False, "error": "工作仍在處理中。"}), 409
         rows = db.execute("SELECT write_json FROM tag_job_items WHERE job_id=? AND status='written' AND (undo_status IS NULL OR undo_status NOT IN ('undone','not_needed'))", (job_id,)).fetchall()
@@ -3957,7 +4596,9 @@ def _perform_photo_analysis(photo_id: int):
         }), 415
 
     image_format, mime_type, extension = image_type
-    analysis_prompt = SHOPPING_JOB_PROMPT if request.args.get("task") == "shopping" else PHOTO_ANALYSIS_PROMPT
+    analysis_task = request.args.get("task")
+    analysis_prompt = (SHOPPING_JOB_PROMPT if analysis_task == "shopping" else
+                       TRAVEL_STAY_PROMPT if analysis_task == "travel_stay" else PHOTO_ANALYSIS_PROMPT)
     if known_tags:
         analysis_prompt += "\n目前登入者在此 Synology Photos 空間的既有標籤（只能在符合照片內容時重用，必須逐字使用）：" + "、".join(known_tags) + "。清單中的人名只可在本張照片的已確認人物清單中出現時使用。"
     if known_people:

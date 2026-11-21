@@ -105,3 +105,4 @@ body { background: var(--canvas); color: var(--ink); }
   .tag-job-item > div:first-child img, .tag-job-no-thumb { width: 112px; height: 84px; }
   .settings-status-grid { grid-template-columns: 1fr; }
 }
+.travel-hotel-candidate textarea { min-height: 58px; resize: vertical; padding: 8px; border: 1px solid #e5ddec; border-radius: 7px; background: #fff; color: #514960; font: inherit; font-size: 10px; }
