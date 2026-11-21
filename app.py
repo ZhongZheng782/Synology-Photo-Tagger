@@ -59,7 +59,7 @@ API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 NAS_SESSION_TTL_SECONDS = 12 * 60 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.4.27")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.4.28")
 PHOTO_TAGGER_AI_PROFILE_VERSION = 1
 PHOTO_TAGGER_AI_VERSION_TAG = f"Photo Tagger AI v{PHOTO_TAGGER_AI_PROFILE_VERSION}"
 PHOTO_TAGGER_AI_VERSION_PATTERN = re.compile(r"^Photo Tagger AI v([0-9]+)$", re.IGNORECASE)
@@ -1821,6 +1821,10 @@ def start_photo_catalog_sync():
     if space not in {"personal", "shared"} or not owner_key:
         return jsonify({"ok": False, "error": "空間或登入帳號無效。"}), 400
     token = session.get("nas_session_token")
+    return queue_photo_catalog_sync(owner_key, space, token)
+
+
+def queue_photo_catalog_sync(owner_key: str, space: str, token: str):
     with _photo_catalog_active_lock:
         if (owner_key, space) in _photo_catalog_active:
             return jsonify({"ok": False, "error": "此空間的目錄同步正在執行。"}), 409
@@ -1835,6 +1839,37 @@ def start_photo_catalog_sync():
             photo_catalog.fail_sync(owner_key, space, run_id, "無法啟動目錄同步工作。")
             return jsonify({"ok": False, "error": "無法啟動目錄同步工作。"}), 503
     return jsonify({"ok": True, "status": "running", "run_id": run_id, "next_offset": offset, "scanned_count": scanned}), 202
+
+
+@app.get("/api/v1/catalog/status")
+@app.get("/api/v1/catalog/sync/<run_id>")
+def external_catalog_status(run_id=None):
+    auth, error = authenticate_job_api({"catalog:read"})
+    if error:
+        return error
+    if request.args.get("space", "personal") != "personal":
+        return jsonify({"ok": False, "error": "外部 API 僅支援個人空間。"}), 400
+    status = photo_catalog.sync_status(auth["owner_key"], "personal")
+    if run_id is not None and status.get("run_id") != run_id:
+        return jsonify({"ok": False, "error": "找不到目前的同步工作。"}), 404
+    return jsonify({"ok": True, "space": "personal", **status})
+
+
+@app.post("/api/v1/catalog/sync")
+def external_catalog_sync():
+    auth, error = authenticate_job_api({"catalog:sync"})
+    if error:
+        return error
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or set(body) - {"space"} or body.get("space", "personal") != "personal":
+        return jsonify({"ok": False, "error": "外部 API 僅支援個人空間，請提供 JSON 物件。"}), 400
+    context = metadata_api_session_context()
+    if not context:
+        return jsonify({"ok": False, "error": "NAS 受信任裝置登入不可用；請重新登入並註冊裝置。"}), 503
+    owner_key, token, _nas = context
+    if owner_key != auth["owner_key"]:
+        return jsonify({"ok": False, "error": "Token 帳號與受信任裝置帳號不一致。"}), 403
+    return queue_photo_catalog_sync(owner_key, "personal", token)
 
 
 @app.get("/api/catalog/query")

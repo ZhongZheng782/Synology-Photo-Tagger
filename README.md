@@ -524,3 +524,15 @@ Llm-Cli-APIServer 的 `PHOTO_TAGGER_API_URL` 設為 Photo Tagger 的 HTTPS 根�
 ### v0.4.27 — Metadata Catalog 同步修正
 
 詳細 metadata 請求沿用單張照片查詢已使用的欄位，移除額外的 `orientation_original` 請求，並分為最多 20 張的批次；NAS 拒絕批次或回傳不完整時拆分查詢。同步失敗會顯示階段、offset 和 NAS 錯誤代碼（若有）；未完成頁面不會標記完成，可由原 checkpoint 繼續。此變更不修改原始照片或標籤。
+
+### v0.4.28 — UC-06 Catalog API
+
+沿用原有 HTTPS Job Bearer Token、每分鐘 60 次請求限制及受信任 NAS 帳號；僅個人空間。新增獨立 scopes，可透過 PHOTO_TAGGER_JOB_API_SCOPES 撤銷。
+
+| Method | Endpoint | Scope |
+|---|---|---|
+| GET | /api/v1/catalog/status | catalog:read |
+| POST | /api/v1/catalog/sync | catalog:sync |
+| GET | /api/v1/catalog/sync/{run_id} | catalog:read |
+
+POST JSON 為 {"space":"personal"}，回傳 202 與 run_id；同步已執行則回 409，請查狀態避免重複觸發。失敗或中斷後可 POST 續跑。狀態包含 scanned_count、photo_count、next_offset、status、error 及 last_success_at；run_id 路由只查目前工作，未知或舊 ID 回 404。只在 status=complete 後建立旅行住宿工作。同步只寫入本機 metadata catalog，不修改照片或標籤，也不啟動 MLX。若受信任登入失效，需重新註冊；不要求或回傳帳密。
