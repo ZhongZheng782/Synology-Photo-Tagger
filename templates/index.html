@@ -122,6 +122,7 @@
         <p class="module-intro">選擇工作類型後設定條件。AI 標記工作依條件建立獨立候選快照；照片庫目前顯示的清單不會自動帶入。</p>
         <div class="work-type-switcher" role="group" aria-label="工作類型">
           <button class="work-type-button active" type="button" data-work-type="ai">AI 標記</button>
+          <button class="work-type-button" type="button" data-work-type="version-upgrade">升級 AI 標記版本</button>
           <button class="work-type-button" type="button" data-work-type="tag-replacement">批次更改標籤</button>
         </div>
         <div id="ai-tag-job-form">
@@ -140,6 +141,26 @@
           <button class="primary-button" id="create-tag-job" type="button">預覽候選並建立快照</button>
         </div>
         <div class="tag-job-notice" id="tag-job-notice" hidden role="status" aria-live="polite"></div>
+        </div>
+        <div id="version-upgrade-work-form" data-current-version="{{ photo_tagger_profile_version }}" hidden>
+          <p class="module-intro">將舊版或尚無版本標記的照片重新分析。有效結果透過 Photos API 寫入並讀回核對後，才加入 <strong>Photo Tagger AI v1</strong>。沿用既有描述保護規則；非空描述不會被覆寫。版本標記代表已由此 AI 標記設定處理，不等於 Docker 映像版本。</p>
+          <div class="tag-job-controls version-upgrade-controls">
+            <label>照片空間<select id="upgrade-space"><option value="personal">個人空間</option><option value="shared">共享空間</option></select></label>
+            <label>升級來源<select id="upgrade-source"><option value="legacy_records">Photo Tagger 已記錄的成功處理照片（無版本標記）</option><option value="older_version_tag">指定舊版標記</option><option value="filtered_unversioned">依條件挑選未標記新版的照片</option></select></label>
+            <label id="upgrade-version-field" hidden>舊版標記<select id="upgrade-version-tag" disabled><option value="">先載入版本標記</option></select></label>
+            <button class="secondary-button" id="load-upgrade-versions" type="button" hidden>載入舊版標記</button>
+            <div id="upgrade-filter-fields" class="upgrade-filter-fields" hidden>
+              <label>地點<select id="upgrade-country"><option value="">不限地點</option><option value="japan">日本</option></select></label>
+              <label>開始日期<input id="upgrade-date-from" type="date"></label>
+              <label>結束日期<input id="upgrade-date-to" type="date"></label>
+              <label>既有標籤（符合任一項）<select id="upgrade-tags" multiple disabled><option>請先載入標籤</option></select></label>
+              <button class="secondary-button" id="load-upgrade-tags" type="button">載入標籤</button>
+            </div>
+            <label>候選照片上限<select id="upgrade-limit"><option>50</option><option>100</option><option>200</option><option>300</option><option>500</option><option>800</option><option selected>1000</option></select></label>
+            <label>執行方式<select id="upgrade-mode"><option value="write" selected>重新分析並自動寫入</option><option value="dry_run">Dry run（不寫入，也不加版本標記）</option></select></label>
+            <button class="primary-button" id="create-upgrade-job" type="button">預覽升級候選並建立工作</button>
+          </div>
+          <div class="tag-job-notice" id="upgrade-job-notice" hidden role="status" aria-live="polite"></div>
         </div>
         <div id="tag-replacement-work-form" hidden>
           <section class="batch-tag-panel" aria-label="批次更改標籤">
@@ -524,7 +545,9 @@
 
     function setBatchWorkType(type) {
       const isReplacement = type === 'tag-replacement';
-      document.getElementById('ai-tag-job-form').hidden = isReplacement;
+      const isVersionUpgrade = type === 'version-upgrade';
+      document.getElementById('ai-tag-job-form').hidden = isReplacement || isVersionUpgrade;
+      document.getElementById('version-upgrade-work-form').hidden = !isVersionUpgrade;
       document.getElementById('tag-replacement-work-form').hidden = !isReplacement;
       document.querySelectorAll('[data-work-type]').forEach(button => {
         const active = button.dataset.workType === type;
@@ -533,6 +556,96 @@
       });
     }
     document.querySelectorAll('[data-work-type]').forEach(button => button.addEventListener('click', () => setBatchWorkType(button.dataset.workType)));
+    document.getElementById('upgrade-source')?.addEventListener('change', event => {
+      const source = event.currentTarget.value;
+      document.getElementById('upgrade-version-field').hidden = source !== 'older_version_tag';
+      document.getElementById('load-upgrade-versions').hidden = source !== 'older_version_tag';
+      document.getElementById('upgrade-filter-fields').hidden = source !== 'filtered_unversioned';
+    });
+    document.getElementById('upgrade-space')?.addEventListener('change', () => {
+      document.getElementById('upgrade-version-tag').replaceChildren(new Option('先載入版本標記', ''));
+      document.getElementById('upgrade-version-tag').disabled = true;
+      document.getElementById('upgrade-tags').replaceChildren(new Option('請先載入標籤', ''));
+      document.getElementById('upgrade-tags').disabled = true;
+    });
+    document.getElementById('load-upgrade-versions')?.addEventListener('click', async event => {
+      const button = event.currentTarget;
+      const select = document.getElementById('upgrade-version-tag');
+      button.disabled = true; button.textContent = '正在載入…';
+      try {
+        const space = document.getElementById('upgrade-space').value;
+        const versions = new Map(); let offset = 0; let complete = false;
+        while (!complete) {
+          const params = new URLSearchParams({space, include_system:'true', offset:String(offset), limit:'1000'});
+          const response = await fetch(`/api/photos/tags?${params}`);
+          const data = await readApiJson(response);
+          if (!data.ok) throw new Error(data.error || '版本標記載入失敗。');
+          for (const tag of data.tags || []) {
+            const match = /^Photo Tagger AI v(\d+)$/i.exec(tag.name || '');
+            const currentVersion = Number(document.getElementById('version-upgrade-work-form').dataset.currentVersion);
+            if (match && Number(match[1]) < currentVersion) versions.set(tag.name, Number(match[1]));
+          }
+          offset = data.next_offset || 0; complete = data.complete !== false || !(data.tags || []).length;
+        }
+        select.replaceChildren();
+        for (const name of [...versions.keys()].sort((a,b) => versions.get(a)-versions.get(b))) select.append(new Option(name,name));
+        if (!versions.size) {
+          select.append(new Option('目前沒有舊版標記；請用其他升級來源', ''));
+          select.disabled = true;
+          document.getElementById('upgrade-job-notice').hidden = false;
+          const currentVersion = document.getElementById('version-upgrade-work-form').dataset.currentVersion;
+          document.getElementById('upgrade-job-notice').textContent = `目前 AI 標記版本是 v${currentVersion}，尚無較舊的版本標記。要轉換既有無版本照片，請選「Photo Tagger 已記錄的成功處理照片」。`;
+        } else select.disabled = false;
+      } catch (error) {
+        select.replaceChildren(new Option(error.message || '載入失敗',''));
+        select.disabled = true;
+      } finally { button.disabled = false; button.textContent = '載入舊版標記'; }
+    });
+    document.getElementById('load-upgrade-tags')?.addEventListener('click', async event => {
+      const button = event.currentTarget; const select = document.getElementById('upgrade-tags');
+      const selected = new Set([...select.selectedOptions].map(option => option.value));
+      button.disabled = true; select.disabled = true; button.textContent = '正在載入…';
+      try {
+        const tags = new Map(); let offset = 0; let complete = false;
+        while (!complete) {
+          const params = new URLSearchParams({space:document.getElementById('upgrade-space').value, offset:String(offset), limit:'500'});
+          const response = await fetch(`/api/photos/tags?${params}`); const data = await readApiJson(response);
+          if (!data.ok) throw new Error(data.error || '標籤讀取失敗。');
+          for (const tag of data.tags || []) if (tag.name) tags.set(tag.name, tag.count);
+          offset = data.next_offset || 0; complete = data.complete !== false || !(data.tags || []).length;
+        }
+        select.replaceChildren();
+        for (const name of [...tags.keys()].sort((a,b)=>a.localeCompare(b,'zh-Hant'))) select.append(new Option(`${name}${tags.get(name) == null ? '' : ` · ${tags.get(name)}`}`,name));
+        select.disabled = !tags.size;
+        button.textContent = `標籤 ${tags.size} 個`;
+      } catch (error) { select.replaceChildren(new Option(error.message || '載入失敗','')); select.disabled = true; button.textContent = '載入標籤'; }
+      finally { button.disabled = false; }
+    });
+    document.getElementById('create-upgrade-job')?.addEventListener('click', async event => {
+      const button = event.currentTarget; button.disabled = true;
+      const source = document.getElementById('upgrade-source').value;
+      try {
+        const payload = await tagJobRequest('/api/tag-jobs', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({
+            upgrade_source:source,
+            source_version_tag:document.getElementById('upgrade-version-tag').value,
+            space:document.getElementById('upgrade-space').value,
+            country:source === 'filtered_unversioned' ? document.getElementById('upgrade-country').value : '',
+            date_from:source === 'filtered_unversioned' ? document.getElementById('upgrade-date-from').value : '',
+            date_to:source === 'filtered_unversioned' ? document.getElementById('upgrade-date-to').value : '',
+            tags:source === 'filtered_unversioned' ? [...document.getElementById('upgrade-tags').selectedOptions].map(option=>option.value) : [],
+            dry_run:document.getElementById('upgrade-mode').value === 'dry_run',
+            max_candidates:Number(document.getElementById('upgrade-limit').value),
+          }),
+        });
+        document.getElementById('upgrade-job-notice').hidden = false;
+        document.getElementById('upgrade-job-notice').textContent = '升級工作已建立，正在讀取候選照片 metadata…';
+        await loadTagJobs(); await openTagJob(payload.job_id); startTagJobPolling(payload.job_id);
+      } catch (error) {
+        const notice=document.getElementById('upgrade-job-notice'); notice.hidden=false; notice.textContent=error.message || '無法建立升級工作。'; notice.classList.add('error-text');
+      } finally { button.disabled = false; }
+    });
     document.getElementById('load-batch-tags')?.addEventListener('click', loadBatchTags);
     document.getElementById('batch-space-select')?.addEventListener('change', () => {
       batchPhotoIds = [];
@@ -1010,6 +1123,7 @@
                           description: result.analysis.description || '',
                           tags: result.analysis.tags || [],
                           preserve_existing_description: true,
+                          photo_tagger_ai: true,
                         }),
                       });
                       const responseText = await response.text();
@@ -1025,6 +1139,7 @@
                         writeResult.description_skipped_existing ? '保留原有描述' : writeResult.description_verified ? '描述已核對' : '',
                         writeResult.tags_added?.length ? `新增標籤：${writeResult.tags_added.join('、')}` : '',
                         writeResult.tags_already_present?.length ? `既有標籤：${writeResult.tags_already_present.join('、')}` : '',
+                        writeResult.version_marker_verified ? `版本標記 ${writeResult.version_marker} 已核對` : '',
                       ].filter(Boolean).join('；');
                       writeStatus.textContent = `完成：${outcome || '內容已核對'}。`;
                     } catch (writeError) {
@@ -1436,6 +1551,10 @@
       if (criteria.date_from || criteria.date_to) filters.push(`${criteria.date_from || '最早'} 至 ${criteria.date_to || '最新'}`);
       const tags = criteria.tags || (criteria.tag ? [criteria.tag] : []);
       if (tags.length) filters.push(tags[0] === '__untagged__' ? '未加標籤' : `標籤：${tags.join('、')}`);
+      const currentVersion = document.getElementById('version-upgrade-work-form')?.dataset.currentVersion || '1';
+      if (criteria.upgrade_source === 'legacy_records') filters.push(`升級 Photo Tagger 舊版成功紀錄至 v${currentVersion}`);
+      else if (criteria.upgrade_source === 'older_version_tag') filters.push(`升級 ${criteria.source_version_tag || '舊版標記'} 至 v${currentVersion}`);
+      else if (criteria.upgrade_source === 'filtered_unversioned') filters.push(`升級篩選出的未標記照片至 v${currentVersion}`);
       if (criteria.skip_processed) filters.push('略過已有 AI 輸出的照片');
       return filters.join(' · ') || '未指定篩選';
     }
@@ -1454,7 +1573,7 @@
           button.type = 'button';
           button.className = `tag-job-row${job.id === activeTagJobId ? ' active' : ''}`;
           const title = document.createElement('strong');
-          title.textContent = `AI 標記 · ${tagJobCriteriaLabel(job.criteria)} · ${job.counts.candidates} 張`;
+          title.textContent = `${job.task === 'version_upgrade' ? 'AI 標記版本升級' : 'AI 標記'} · ${tagJobCriteriaLabel(job.criteria)} · ${job.counts.candidates} 張`;
           const detail = document.createElement('small');
           detail.className = 'tag-job-row-meta';
           detail.textContent = `${job.space === 'personal' ? '個人空間' : '共享空間'} · ${tagJobStatusText(job.status)} · Dry run ${job.counts.dry_run}`;
@@ -1535,8 +1654,8 @@
           const written = document.createElement('p');
           written.className = 'tag-job-result';
           written.textContent = item.write.dry_run
-            ? `Dry run 預覽：${item.write.would_add_tags?.join('、') || '無需新增標籤'}${item.write.would_write_description ? '；將寫入補充描述' : ''}${item.write.description_skipped_existing ? '；保留原有描述' : ''}${item.write.description_already_matches ? '；描述已相同' : ''}`
-            : `${item.write.description_skipped_existing ? '原有描述已保留；' : ''}${item.write.tags_added?.length ? `已新增：${item.write.tags_added.join('、')}` : '標籤已存在'}；Photos API 讀回核對完成。`;
+            ? `Dry run 預覽：${item.write.would_add_tags?.join('、') || '無需新增內容標籤'}；不會寫入版本標記 ${item.write.would_add_version_marker || ''}${item.write.would_write_description ? '；將寫入補充描述' : ''}${item.write.description_skipped_existing ? '；保留原有描述' : ''}${item.write.description_already_matches ? '；描述已相同' : ''}`
+            : `${item.write.description_skipped_existing ? '原有描述已保留；' : ''}${item.write.tags_added?.length ? `已新增：${item.write.tags_added.join('、')}` : '內容標籤已存在'}；${item.write.version_marker_verified ? `版本標記 ${item.write.version_marker} 已核對；` : ''}Photos API 讀回核對完成。`;
           content.append(written);
         }
         if (
@@ -1699,7 +1818,7 @@
       document.getElementById('tag-job-title').textContent = `AI 標記工作 · ${tagJobCriteriaLabel(job.criteria)} · ${job.id.slice(0, 8)}`;
       const report = document.getElementById('tag-job-report');
       const counts = job.counts;
-      report.textContent = `狀態：${tagJobStatusText(job.status)}　候選 ${counts.candidates}　候選排除已有 AI 輸出 ${job.skipped_processed_count || 0} 張　已分析 ${counts.analyzed}　已略過 ${counts.skipped}　分析失敗 ${counts.failed}　需核對 ${counts.needs_review}　已寫入 ${counts.written}　Dry run ${counts.dry_run}`;
+      report.textContent = `狀態：${tagJobStatusText(job.status)}　候選 ${counts.candidates}　候選排除已有 AI 輸出 ${job.skipped_processed_count || 0} 張　排除已標記新版 ${job.skipped_version_count || 0} 張　已分析 ${counts.analyzed}　已略過 ${counts.skipped}　分析失敗 ${counts.failed}　需核對 ${counts.needs_review}　已寫入 ${counts.written}　Dry run ${counts.dry_run}`;
       if (!job.snapshot_complete) {
         const limitNote = document.createElement('p');
         limitNote.className = 'tag-job-warning';

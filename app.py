@@ -7,6 +7,7 @@ import io
 import json
 import math
 import os
+import re
 import secrets
 import sqlite3
 import threading
@@ -50,7 +51,10 @@ API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 NAS_SESSION_TTL_SECONDS = 12 * 60 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.4.21")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.4.22")
+PHOTO_TAGGER_AI_PROFILE_VERSION = 1
+PHOTO_TAGGER_AI_VERSION_TAG = f"Photo Tagger AI v{PHOTO_TAGGER_AI_PROFILE_VERSION}"
+PHOTO_TAGGER_AI_VERSION_PATTERN = re.compile(r"^Photo Tagger AI v([0-9]+)$", re.IGNORECASE)
 TAGGER_DB_PATH = os.environ.get(
     "TAGGER_DB_PATH", os.path.join(os.path.dirname(__file__), "data", "photo-tagger.sqlite3")
 )
@@ -187,6 +191,7 @@ def initialize_tag_job_db() -> None:
                 candidate_count INTEGER NOT NULL DEFAULT 0,
                 scanned_count INTEGER NOT NULL DEFAULT 0,
                 skipped_processed_count INTEGER NOT NULL DEFAULT 0,
+                skipped_version_count INTEGER NOT NULL DEFAULT 0,
                 error TEXT,
                 created_at REAL NOT NULL,
                 updated_at REAL NOT NULL
@@ -225,6 +230,14 @@ def initialize_tag_job_db() -> None:
                 processed_at REAL NOT NULL,
                 PRIMARY KEY(owner_key, space, photo_id)
             );
+            CREATE TABLE IF NOT EXISTS photo_tagger_processed_versions (
+                owner_key TEXT NOT NULL,
+                space TEXT NOT NULL,
+                photo_id INTEGER NOT NULL,
+                profile_version INTEGER NOT NULL,
+                processed_at REAL NOT NULL,
+                PRIMARY KEY(owner_key, space, photo_id, profile_version)
+            );
             CREATE TABLE IF NOT EXISTS tag_job_schedules (
                 id TEXT PRIMARY KEY,
                 owner_key TEXT NOT NULL,
@@ -247,6 +260,8 @@ def initialize_tag_job_db() -> None:
         job_columns = {row["name"] for row in db.execute("PRAGMA table_info(tag_jobs)").fetchall()}
         if "skipped_processed_count" not in job_columns:
             db.execute("ALTER TABLE tag_jobs ADD COLUMN skipped_processed_count INTEGER NOT NULL DEFAULT 0")
+        if "skipped_version_count" not in job_columns:
+            db.execute("ALTER TABLE tag_jobs ADD COLUMN skipped_version_count INTEGER NOT NULL DEFAULT 0")
         item_columns = {row["name"] for row in db.execute("PRAGMA table_info(tag_job_items)").fetchall()}
         if "reviewed_tag" not in item_columns:
             db.execute("ALTER TABLE tag_job_items ADD COLUMN reviewed_tag TEXT")
@@ -1121,6 +1136,7 @@ def index():
         base_url=configured_base_url(),
         sdk_version=sdk_version(),
         app_version=APP_VERSION,
+        photo_tagger_profile_version=PHOTO_TAGGER_AI_PROFILE_VERSION,
         show_connection_warning=should_show_connection_warning(),
         library_mounted=os.path.isdir("/Photos"),
         logged_in=current_nas_session() is not None,
@@ -1685,6 +1701,7 @@ def list_photo_tags():
     if not token:
         return jsonify({"ok": False, "error": "登入工作階段已失效，請重新登入。"}), 401
     try:
+        include_system_tags = request.args.get("include_system") == "true"
         offset = max(0, int(request.args.get("offset", "0")))
         limit = min(1000, max(1, int(request.args.get("limit", "500"))))
     except ValueError:
@@ -1711,6 +1728,8 @@ def list_photo_tags():
         tags = []
         for row in rows:
             if not isinstance(row, dict) or not isinstance(row.get("name"), str) or not row["name"].strip():
+                continue
+            if not include_system_tags and photo_tagger_version_number(row["name"]) is not None:
                 continue
             item_count = row.get("item_count", row.get("items", row.get("count")))
             tags.append({
@@ -1749,7 +1768,7 @@ def list_photo_tags():
             for photo in index.photos:
                 for name in photo.get("tags", []):
                     clean_name = str(name).strip()
-                    if clean_name:
+                    if clean_name and (include_system_tags or photo_tagger_version_number(clean_name) is None):
                         counts[clean_name] = counts.get(clean_name, 0) + 1
             all_tags = sorted(counts.items(), key=lambda item: item[0].casefold())
             page = all_tags[offset:offset + limit]
@@ -1992,6 +2011,35 @@ def record_photo_tagger_processed(owner_key: str, space: str, photo_id: int) -> 
         )
 
 
+def record_photo_tagger_version(owner_key: str, space: str, photo_id: int, profile_version: int) -> None:
+    with tag_job_db() as db:
+        db.execute(
+            "INSERT INTO photo_tagger_processed_versions(owner_key,space,photo_id,profile_version,processed_at) "
+            "VALUES(?,?,?,?,?) ON CONFLICT(owner_key,space,photo_id,profile_version) "
+            "DO UPDATE SET processed_at=excluded.processed_at",
+            (owner_key, space, photo_id, profile_version, time.time()),
+        )
+
+
+def photo_tagger_version_number(tag_name: object) -> int | None:
+    if not isinstance(tag_name, str):
+        return None
+    match = PHOTO_TAGGER_AI_VERSION_PATTERN.fullmatch(tag_name.strip())
+    return int(match.group(1)) if match else None
+
+
+def has_current_photo_tagger_version(tags: object) -> bool:
+    return any(
+        (version := photo_tagger_version_number(tag)) is not None
+        and version >= PHOTO_TAGGER_AI_PROFILE_VERSION
+        for tag in (tags if isinstance(tags, list) else [])
+    )
+
+
+def has_any_photo_tagger_version(tags: object) -> bool:
+    return any(photo_tagger_version_number(tag) is not None for tag in (tags if isinstance(tags, list) else []))
+
+
 def photo_tagger_processed_ids(db: sqlite3.Connection, owner_key: str, space: str) -> set[int]:
     """Return photos with verified Photo Tagger AI output, including older AI job records."""
     rows = db.execute(
@@ -2138,6 +2186,7 @@ def tag_job_summary(db: sqlite3.Connection, job: sqlite3.Row) -> dict:
         "snapshot_complete": bool(job["snapshot_complete"]),
         "scanned_count": job["scanned_count"], "error": job["error"],
         "skipped_processed_count": job["skipped_processed_count"],
+        "skipped_version_count": job["skipped_version_count"],
         "created_at": job["created_at"], "updated_at": job["updated_at"],
         "counts": counts,
     }
@@ -2218,7 +2267,93 @@ def matching_job_photos_by_criteria(index: PhotoLibraryIndex, criteria: dict) ->
     return matches
 
 
+def prepare_legacy_version_upgrade_job(
+    job_id: str, owner_key: str, nas_token: str, space: str, criteria: dict
+) -> None:
+    max_candidates = int(criteria["max_candidates"])
+    try:
+        with tag_job_db() as db:
+            processed_ids = sorted(photo_tagger_processed_ids(db, owner_key, space), reverse=True)
+        selected: list[dict] = []
+        skipped_current = 0
+        scanned = 0
+        with app.test_request_context("/"):
+            session["nas_session_token"] = nas_token
+            nas = current_nas_session()
+            if not nas:
+                raise SynologyApiError("登入工作階段已失效；請重新登入後繼續升級。")
+            api_name = "SYNO.Foto.Browse.Item" if space == "personal" else "SYNO.FotoTeam.Browse.Item"
+            url, version = api_endpoint(nas, api_name)
+            for start in range(0, len(processed_ids), photo_catalog.DETAIL_BATCH_SIZE):
+                batch = processed_ids[start:start + photo_catalog.DETAIL_BATCH_SIZE]
+                payload = post_synology(nas.client, url, {
+                    "api": api_name, "version": version, "method": "get",
+                    "id": json.dumps(batch, separators=(",", ":")),
+                    "additional": json.dumps(["thumbnail", "resolution", "gps", "address", "tag"], separators=(",", ":")),
+                    "_sid": nas.sid,
+                })
+                data = payload.get("data")
+                items = data.get("list") if isinstance(data, dict) else None
+                if not isinstance(items, list):
+                    raise SynologyApiError("Photos API 沒有回傳舊照片的 metadata 清單。")
+                scanned += len(batch)
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    summary = item_summary(item)
+                    if not isinstance(summary.get("id"), int):
+                        continue
+                    if has_current_photo_tagger_version(summary.get("tags")):
+                        skipped_current += 1
+                        continue
+                    selected.append(summary)
+                    if len(selected) > max_candidates:
+                        break
+                with tag_job_db() as db:
+                    db.execute(
+                        "UPDATE tag_jobs SET scanned_count=?, skipped_version_count=?, updated_at=? WHERE id=? AND owner_key=?",
+                        (scanned, skipped_current, time.time(), job_id, owner_key),
+                    )
+                if len(selected) > max_candidates:
+                    break
+        truncated = len(selected) > max_candidates or scanned < len(processed_ids)
+        selected = selected[:max_candidates]
+        warning = (
+            f"已掃描 {scanned} 筆 Photo Tagger 成功紀錄，候選達上限 {max_candidates} 張；可再建立升級工作處理其餘照片。"
+            if truncated else None
+        )
+        snapshot_fields = (
+            "id", "filename", "thumbnail_ready", "thumbnail_cache_key", "thumbnail_unit_id",
+            "thumbnail_size", "taken_at", "time", "country", "city", "tags",
+        )
+        with tag_job_db() as db:
+            db.executemany(
+                "INSERT OR IGNORE INTO tag_job_items(job_id,photo_id,photo_json,updated_at) VALUES(?,?,?,?)",
+                [
+                    (job_id, int(photo["id"]), json.dumps(
+                        {key: photo[key] for key in snapshot_fields if key in photo}, ensure_ascii=False
+                    ), time.time())
+                    for photo in selected
+                ],
+            )
+            db.execute(
+                "UPDATE tag_jobs SET candidate_count=?,snapshot_complete=?,scanned_count=?,skipped_version_count=?,status=?,error=?,updated_at=? WHERE id=? AND owner_key=?",
+                (len(selected), int(not truncated), scanned, skipped_current,
+                 "ready" if selected else "empty", warning, time.time(), job_id, owner_key),
+            )
+    except Exception as exc:
+        app.logger.exception("Could not prepare legacy Photo Tagger upgrade job %s", job_id)
+        with tag_job_db() as db:
+            db.execute(
+                "UPDATE tag_jobs SET status='failed',error=?,updated_at=? WHERE id=? AND owner_key=?",
+                (str(exc)[:500], time.time(), job_id, owner_key),
+            )
+
+
 def prepare_tag_job(job_id: str, owner_key: str, nas_token: str, space: str, criteria: dict) -> None:
+    if criteria.get("upgrade_source") == "legacy_records":
+        prepare_legacy_version_upgrade_job(job_id, owner_key, nas_token, space, criteria)
+        return
     max_candidates = int(criteria["max_candidates"])
     try:
         with app.test_request_context("/"):
@@ -2239,7 +2374,11 @@ def prepare_tag_job(job_id: str, owner_key: str, nas_token: str, space: str, cri
                 processed_ids = photo_tagger_processed_ids(db, owner_key, space) if criteria.get("skip_processed") else set()
             def eligible_matches():
                 all_matches = matching_job_photos_by_criteria(index, criteria)
-                return all_matches, [photo for photo in all_matches if photo.get("id") not in processed_ids]
+                matches = [photo for photo in all_matches if photo.get("id") not in processed_ids]
+                if criteria.get("exclude_current_version"):
+                    version_check = has_any_photo_tagger_version if criteria.get("upgrade_source") == "filtered_unversioned" else has_current_photo_tagger_version
+                    matches = [photo for photo in matches if not version_check(photo.get("tags"))]
+                return all_matches, matches
             for _ in range(TAG_JOB_MAX_SCAN_PAGES):
                 all_matches, matches = eligible_matches()
                 if index.complete or len(matches) > max_candidates:
@@ -2252,6 +2391,10 @@ def prepare_tag_job(job_id: str, owner_key: str, nas_token: str, space: str, cri
                     )
             all_matches, matches = eligible_matches()
             skipped_processed_count = sum(photo.get("id") in processed_ids for photo in all_matches)
+            skipped_version_count = sum(
+                (has_any_photo_tagger_version if criteria.get("upgrade_source") == "filtered_unversioned" else has_current_photo_tagger_version)(photo.get("tags"))
+                for photo in all_matches
+            ) if criteria.get("exclude_current_version") else 0
             selected = matches[:max_candidates]
             truncated = len(matches) > max_candidates or not index.complete
             if len(matches) > max_candidates:
@@ -2281,9 +2424,9 @@ def prepare_tag_job(job_id: str, owner_key: str, nas_token: str, space: str, cri
                     ],
                 )
                 db.execute(
-                    "UPDATE tag_jobs SET candidate_count=?, snapshot_complete=?, scanned_count=?, skipped_processed_count=?, status=?, error=?, updated_at=? "
+                    "UPDATE tag_jobs SET candidate_count=?, snapshot_complete=?, scanned_count=?, skipped_processed_count=?, skipped_version_count=?, status=?, error=?, updated_at=? "
                     "WHERE id=? AND owner_key=?",
-                    (len(selected), int(not truncated), index.source_offset, skipped_processed_count,
+                    (len(selected), int(not truncated), index.source_offset, skipped_processed_count, skipped_version_count,
                      "ready" if selected else "empty",
                      snapshot_warning,
                      time.time(), job_id, owner_key),
@@ -2480,7 +2623,8 @@ def create_tag_job():
     raw_tags = body.get("tags", [tag_filter] if tag_filter else [])
     date_from_raw = body.get("date_from", "")
     date_to_raw = body.get("date_to", "")
-    task = body.get("task", "photo")
+    upgrade_source = body.get("upgrade_source")
+    task = "version_upgrade" if upgrade_source else body.get("task", "photo")
     dry_run = body.get("dry_run") is True
     skip_processed = body.get("skip_processed", True)
     if not isinstance(skip_processed, bool):
@@ -2494,6 +2638,23 @@ def create_tag_job():
     if not isinstance(raw_tags, list) or len(raw_tags) > 30 or any(not isinstance(tag, str) for tag in raw_tags):
         return jsonify({"ok": False, "error": "標籤條件格式無效。"}), 400
     tags = list(dict.fromkeys(tag.strip() for tag in raw_tags if tag.strip()))
+    source_version_tag = body.get("source_version_tag", "")
+    if upgrade_source is not None and (
+        not isinstance(upgrade_source, str)
+        or upgrade_source not in {"legacy_records", "older_version_tag", "filtered_unversioned"}
+    ):
+        return jsonify({"ok": False, "error": "升級來源類型無效。"}), 400
+    if upgrade_source == "legacy_records":
+        country, tags, date_from_raw, date_to_raw = "", [], "", ""
+    elif upgrade_source == "older_version_tag":
+        if not isinstance(source_version_tag, str) or photo_tagger_version_number(source_version_tag) is None:
+            return jsonify({"ok": False, "error": "請選擇有效的舊版 Photo Tagger 標記。"}), 400
+        source_version = photo_tagger_version_number(source_version_tag)
+        if source_version is None or source_version >= PHOTO_TAGGER_AI_PROFILE_VERSION:
+            return jsonify({"ok": False, "error": "來源標記必須是目前 AI 標記版本之前的版本。"}), 400
+        tags = [source_version_tag]
+    elif upgrade_source == "filtered_unversioned":
+        source_version_tag = ""
     if any(len(tag) > 64 for tag in tags):
         return jsonify({"ok": False, "error": "每個標籤條件不可超過 64 個字元。"}), 400
     if "__untagged__" in tags and len(tags) > 1:
@@ -2509,9 +2670,11 @@ def create_tag_job():
         return jsonify({"ok": False, "error": "日期請使用 YYYY-MM-DD 格式。"}), 400
     if parsed_from and parsed_to and parsed_from > parsed_to:
         return jsonify({"ok": False, "error": "開始日期不可晚於結束日期。"}), 400
-    if not country and not tags and not date_from and not date_to:
+    if not upgrade_source and not country and not tags and not date_from and not date_to:
         return jsonify({"ok": False, "error": "請至少設定地點、日期或既有標籤條件。"}), 400
-    if task != "photo":
+    if upgrade_source == "filtered_unversioned" and not country and not tags and not date_from and not date_to:
+        return jsonify({"ok": False, "error": "請至少設定地點、日期或既有標籤條件。"}), 400
+    if not upgrade_source and task != "photo":
         return jsonify({"ok": False, "error": "AI 標記工作類型無效。"}), 400
     if max_candidates < 1 or max_candidates > TAG_JOB_MAX_CANDIDATES:
         return jsonify({"ok": False, "error": f"每個工作最多選取 {TAG_JOB_MAX_CANDIDATES} 張照片。"}), 400
@@ -2531,7 +2694,10 @@ def create_tag_job():
             "date_to": date_to,
             "max_candidates": max_candidates,
             "dry_run": dry_run,
-            "skip_processed": skip_processed,
+            "skip_processed": False if upgrade_source else skip_processed,
+            "upgrade_source": upgrade_source,
+            "source_version_tag": source_version_tag or "",
+            "exclude_current_version": bool(upgrade_source),
         }
         db.execute(
             "INSERT INTO tag_jobs(id, owner_key, space, task, criteria_json, status, created_at, updated_at) "
@@ -2804,6 +2970,7 @@ def run_tag_job_analysis(job_id: str, owner_key: str, nas_token: str) -> None:
                     "description_skipped_existing": description_would_be_skipped,
                     "description_already_matches": bool(safe_result["description"] and safe_result["description"] == existing_description),
                     "would_add_tags": safe_result["tags"],
+                    "would_add_version_marker": PHOTO_TAGGER_AI_VERSION_TAG,
                 }
                 state = "dry_run"
             else:
@@ -2815,8 +2982,12 @@ def run_tag_job_analysis(job_id: str, owner_key: str, nas_token: str) -> None:
                     "description_verified": result.get("description_verified") is True,
                     "description_skipped_existing": result.get("description_skipped_existing") is True,
                     "tags_added": result.get("tags_added", []),
+                    "tags_added_ids": result.get("tags_added_ids", []),
                     "tags_already_present": result.get("tags_already_present", []),
                     "tags_verified": result.get("tags_verified") is True,
+                    "version_marker": result.get("version_marker"),
+                    "version_marker_added": result.get("version_marker_added") is True,
+                    "version_marker_verified": result.get("version_marker_verified") is True,
                     "error": (
                         result.get("error") or result.get("description_error")
                         or result.get("tags_error") or result.get("readback_error")
@@ -2961,6 +3132,7 @@ def call_job_write_analysis_route(
             "description": description,
             "tags": tags,
             "preserve_existing_description": True,
+            "photo_tagger_ai": True,
         },
     ):
         session["nas_session_token"] = nas_token
@@ -3085,10 +3257,17 @@ def run_tag_job_undo(job_id: str, owner_key: str, nas_token: str, space: str) ->
                     if isinstance(tag, dict) and isinstance(tag.get("name"), str)
                 } if found and isinstance(found[0], dict) else set()
                 added_names = {str(name).casefold() for name in write_info.get("tags_added", [])}
+                if write_info.get("version_marker_added") and isinstance(write_info.get("version_marker"), str):
+                    added_names.add(write_info["version_marker"].casefold())
                 remaining = sorted(added_names & current_names)
                 undo_result = {"ok": not remaining, "tags_removed": write_info.get("tags_added", []), "still_present": remaining}
                 with tag_job_db() as db:
                     db.execute("UPDATE tag_job_items SET undo_status=?, error=?, updated_at=? WHERE job_id=? AND photo_id=?", ("undone" if not remaining else "failed", "；".join(remaining) if remaining else None, time.time(), job_id, photo_id))
+                    if not remaining and write_info.get("version_marker_added"):
+                        db.execute(
+                            "DELETE FROM photo_tagger_processed_versions WHERE owner_key=? AND space=? AND photo_id=? AND profile_version=?",
+                            (owner_key, space, photo_id, PHOTO_TAGGER_AI_PROFILE_VERSION),
+                        )
             with tag_job_db() as db:
                 remaining = db.execute("SELECT COUNT(*) FROM tag_job_items WHERE job_id=? AND status='written' AND (undo_status IS NULL OR undo_status NOT IN ('undone','not_needed'))", (job_id,)).fetchone()[0]
                 db.execute("UPDATE tag_jobs SET status=?, updated_at=? WHERE id=?", ("undone" if not remaining else "partially_undone", time.time(), job_id))
@@ -3161,7 +3340,7 @@ def photo_tag_vocabulary(nas: NasSession, space: str) -> list[str]:
                 raise SynologyApiError("Synology Photos 沒有回傳標籤清單。")
             for row in rows:
                 name = row.get("name") if isinstance(row, dict) else None
-                if isinstance(name, str) and name.strip() and name.strip() not in names:
+                if isinstance(name, str) and name.strip() and photo_tagger_version_number(name) is None and name.strip() not in names:
                     names.append(name.strip())
             offset += len(rows)
             if len(rows) < page_size:
@@ -3692,7 +3871,7 @@ def _perform_photo_analysis(photo_id: int):
         additional = item.get("additional") if isinstance(item.get("additional"), dict) else {}
         metadata = item_metadata(item)
         known_people = metadata.get("people", [])
-        known_tags = photo_tag_vocabulary(nas, space)
+        known_tags = [name for name in photo_tag_vocabulary(nas, space) if photo_tagger_version_number(name) is None]
         for key in ("country", "state", "county", "city", "district", "town", "village", "landmark", "route"):
             value = metadata.get(key)
             if isinstance(value, str) and value.strip() and value.strip() not in known_location:
@@ -3899,12 +4078,13 @@ def write_photo_analysis(photo_id: int):
         return jsonify({"ok": False, "error": "標籤必須是最多 30 個文字項目。"}), 400
     clean_description = description.strip()
     preserve_existing_description = payload.get("preserve_existing_description") is True
+    photo_tagger_ai_write = payload.get("photo_tagger_ai") is True
     clean_tags = []
     seen_tags = set()
     for raw_tag in tags:
         tag_name = raw_tag.strip()
         folded = tag_name.casefold()
-        if tag_name and folded not in seen_tags:
+        if tag_name and photo_tagger_version_number(tag_name) is None and folded not in seen_tags:
             clean_tags.append(tag_name)
             seen_tags.add(folded)
     if any(len(tag) > 64 for tag in clean_tags):
@@ -3957,19 +4137,23 @@ def write_photo_analysis(photo_id: int):
     existing_folded = {name.casefold() for name in existing_tag_names}
     already_present = [tag for tag in clean_tags if tag.casefold() in existing_folded]
     tags_to_add = [tag for tag in clean_tags if tag.casefold() not in existing_folded]
+    marker_folded = PHOTO_TAGGER_AI_VERSION_TAG.casefold()
+    version_marker_already_present = marker_folded in existing_folded
+    version_marker_to_add = photo_tagger_ai_write and not version_marker_already_present
+    all_tags_to_add = tags_to_add + ([PHOTO_TAGGER_AI_VERSION_TAG] if version_marker_to_add else [])
 
     description_succeeded = False
     description_error = None
     description_error_code = None
-    tags_succeeded = not tags_to_add
+    tags_succeeded = not all_tags_to_add
     tags_error = None
     tags_error_code = None
     tags_error_details = []
     tag_ids = []
 
-    if tags_to_add:
+    if all_tags_to_add:
         try:
-            for tag_name in tags_to_add:
+            for tag_name in all_tags_to_add:
                 tag_ids.append(create_or_resolve_photo_tag_id(nas, tag_api, tag_name))
             post_synology(
                 nas.client,
@@ -4035,7 +4219,10 @@ def write_photo_analysis(photo_id: int):
             "description_api_succeeded": description_succeeded,
             "tags_api_succeeded": tags_succeeded,
             "tags_added": tags_to_add if tags_succeeded else [],
+            "tags_added_ids": tag_ids if tags_succeeded else [],
             "tags_already_present": already_present,
+            "version_marker": PHOTO_TAGGER_AI_VERSION_TAG if photo_tagger_ai_write else None,
+            "version_marker_added": bool(photo_tagger_ai_write and version_marker_to_add and tags_succeeded),
             "error": "寫入請求已送出，但讀回核對失敗。",
             "readback_error": str(exc),
             "readback_error_code": exc.error_code,
@@ -4059,7 +4246,7 @@ def write_photo_analysis(photo_id: int):
     }
     tags_added_ids = [
         after_tag_ids_by_name[tag.casefold()]
-        for tag in tags_to_add
+        for tag in all_tags_to_add
         if tags_succeeded and isinstance(after_tag_ids_by_name.get(tag.casefold()), int)
     ]
     success = (
@@ -4067,11 +4254,12 @@ def write_photo_analysis(photo_id: int):
         and (not description_skipped_existing or description_verified)
         and tags_succeeded
         and tags_verified
+        and (not photo_tagger_ai_write or marker_folded in verified_tag_names)
     )
     owner_key = tag_job_owner_key()
-    if success and owner_key and tags_to_add:
+    if success and owner_key and all_tags_to_add:
         try:
-            record_photo_tagger_tags(owner_key, space, photo_id, tags_to_add)
+            record_photo_tagger_tags(owner_key, space, photo_id, all_tags_to_add)
         except sqlite3.Error:
             # A provenance index failure must not convert a verified Photos API write into an apparent failure.
             app.logger.exception("Could not record Photo Tagger tag provenance for item %s", photo_id)
@@ -4080,6 +4268,11 @@ def write_photo_analysis(photo_id: int):
             record_photo_tagger_processed(owner_key, space, photo_id)
         except sqlite3.Error:
             app.logger.exception("Could not record Photo Tagger processing provenance for item %s", photo_id)
+    if success and owner_key and photo_tagger_ai_write:
+        try:
+            record_photo_tagger_version(owner_key, space, photo_id, PHOTO_TAGGER_AI_PROFILE_VERSION)
+        except sqlite3.Error:
+            app.logger.exception("Could not record Photo Tagger AI profile version for item %s", photo_id)
     return jsonify({
         "ok": success,
         "photo_id": photo_id,
@@ -4094,6 +4287,9 @@ def write_photo_analysis(photo_id: int):
         "tags_added_ids": tags_added_ids,
         "tags_already_present": already_present,
         "tags_verified": tags_verified,
+        "version_marker": PHOTO_TAGGER_AI_VERSION_TAG if photo_tagger_ai_write else None,
+        "version_marker_added": bool(photo_tagger_ai_write and version_marker_to_add and tags_succeeded),
+        "version_marker_verified": marker_folded in verified_tag_names if photo_tagger_ai_write else None,
         "description_error": description_error,
         "description_error_code": description_error_code,
         "tags_error": tags_error,
