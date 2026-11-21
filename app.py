@@ -59,7 +59,7 @@ API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 NAS_SESSION_TTL_SECONDS = 12 * 60 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.4.26")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.4.27")
 PHOTO_TAGGER_AI_PROFILE_VERSION = 1
 PHOTO_TAGGER_AI_VERSION_TAG = f"Photo Tagger AI v{PHOTO_TAGGER_AI_PROFILE_VERSION}"
 PHOTO_TAGGER_AI_VERSION_PATTERN = re.compile(r"^Photo Tagger AI v([0-9]+)$", re.IGNORECASE)
@@ -384,17 +384,50 @@ _tag_replacement_jobs: dict[str, dict] = {}
 _tag_replacement_jobs_lock = threading.Lock()
 
 
+def catalog_detail_batch(nas, url, version, api_name, ids):
+    """Use the supported metadata fields and split rejected bulk reads."""
+    try:
+        payload = post_synology(nas.client, url, {
+            "api": api_name, "version": version, "method": "get",
+            "id": json.dumps([int(photo_id) for photo_id in ids], separators=(",", ":")),
+            "additional": json.dumps(["exif", "description", "orientation", "resolution", "gps", "address", "geocoding_id", "tag", "person"], separators=(",", ":")),
+            "_sid": nas.sid,
+        })
+        data = payload.get("data")
+        details = data.get("list") if isinstance(data, dict) else None
+        if not isinstance(details, list):
+            raise SynologyApiError("Photos API 回應中沒有詳細 metadata。")
+        by_id = {str(item.get("id")): item for item in details if isinstance(item, dict)}
+        if any(str(photo_id) not in by_id for photo_id in ids):
+            raise SynologyApiError("Photos API 詳細資料不完整。")
+        return by_id
+    except SynologyApiError as exc:
+        # Never fan out expired sessions, permission or transport failures.
+        if len(ids) <= 1:
+            raise
+        if exc.error_code is None and str(exc) != "Photos API 詳細資料不完整。":
+            raise
+        if exc.error_code in (105, 106, 107, 119, 400, 401, 402, 403, 404, 406):
+            raise
+        middle = len(ids) // 2
+        return {**catalog_detail_batch(nas, url, version, api_name, ids[:middle]),
+                **catalog_detail_batch(nas, url, version, api_name, ids[middle:])}
+
+
 def run_photo_catalog_sync(owner_key: str, space: str, run_id: str, offset: int,
                            scanned_count: int, nas_token: str) -> None:
     api_name = "SYNO.Foto.Browse.Item" if space == "personal" else "SYNO.FotoTeam.Browse.Item"
+    stage = "session"
     try:
         while True:
+            stage = "session"
             with app.test_request_context("/"):
                 session["nas_session_token"] = nas_token
                 nas = current_nas_session()
                 if not nas:
                     raise SynologyApiError("NAS 登入工作階段已失效；可重新登入後繼續同步。")
                 url, version = api_endpoint(nas, api_name)
+                stage = "list"
                 listed = post_synology(nas.client, url, {
                     "api": api_name, "version": version, "method": "list",
                     "offset": offset, "limit": photo_catalog.PAGE_SIZE,
@@ -413,19 +446,11 @@ def run_photo_catalog_sync(owner_key: str, space: str, run_id: str, offset: int,
                 ids = [item.get("id") for item in summaries]
                 if any(not isinstance(photo_id, (int, str)) or not str(photo_id).isdigit() for photo_id in ids):
                     raise SynologyApiError("Photos API 清單含無效項目 ID。")
-                details_payload = post_synology(nas.client, url, {
-                    "api": api_name, "version": version, "method": "get",
-                    "id": json.dumps([int(photo_id) for photo_id in ids], separators=(",", ":")),
-                    "additional": json.dumps(["exif", "description", "orientation", "orientation_original", "resolution", "gps", "address", "geocoding_id", "tag", "person"], separators=(",", ":")),
-                    "_sid": nas.sid,
-                })
-                detail_data = details_payload.get("data")
-                details = detail_data.get("list") if isinstance(detail_data, dict) else None
-                if not isinstance(details, list):
-                    raise SynologyApiError("Photos API 回應中沒有詳細 metadata。")
-                details_by_id = {str(item.get("id")): item for item in details if isinstance(item, dict)}
-                if any(str(photo_id) not in details_by_id for photo_id in ids):
-                    raise SynologyApiError("Photos API 詳細資料不完整；已保留目前進度，可稍後繼續。")
+                stage = "get"
+                details_by_id = {}
+                for start in range(0, len(ids), 20):
+                    details_by_id.update(catalog_detail_batch(nas, url, version, api_name, ids[start:start + 20]))
+                stage = "save"
                 records = [photo_catalog._catalog_record(summary, details_by_id[str(summary["id"])], owner_key, space, run_id)
                            for summary in summaries]
                 if any(record[0].get("photo_id") is None for record in records):
@@ -438,8 +463,12 @@ def run_photo_catalog_sync(owner_key: str, space: str, run_id: str, offset: int,
                     photo_catalog.finish_sync(owner_key, space, run_id, offset, scanned_count)
                     return
     except Exception as exc:
-        app.logger.exception("Local photo catalog sync failed (space=%s, offset=%s)", space, offset)
-        photo_catalog.fail_sync(owner_key, space, run_id, str(exc) or "同步失敗")
+        code = exc.error_code if isinstance(exc, SynologyApiError) else None
+        message = f"{stage} offset={offset}: {str(exc) or '同步失敗'}"
+        if code is not None:
+            message += f" (NAS code={code})"
+        app.logger.exception("Local photo catalog sync failed (space=%s, stage=%s, offset=%s, code=%s)", space, stage, offset, code)
+        photo_catalog.fail_sync(owner_key, space, run_id, message)
     finally:
         with _photo_catalog_active_lock:
             _photo_catalog_active.discard((owner_key, space))

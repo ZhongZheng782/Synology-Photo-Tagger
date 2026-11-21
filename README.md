@@ -520,3 +520,7 @@ ssh -i <private-key> -p 2223 root@127.0.0.1
 Llm-Cli-APIServer 的 `PHOTO_TAGGER_API_URL` 設為 Photo Tagger 的 HTTPS 根網址（不是 DSM 網址）。呼叫：
 `GET /api/v1/metadata/photos?date_from=2026-11-12&date_to=2026-11-19&offset=0&limit=50`
 並送出 `Authorization: Bearer <token>` header。只允許 HTTPS、個人空間、最長 31 日區間及每頁 100 張。回傳拍攝時間、地點、GPS、描述與標籤，不回傳影像或人物辨識名單。依 next_offset 和 has_more 逐頁讀取；缺少日期或超出日期範圍的項目不回傳。未啟用、未註冊受信任裝置回傳 503；無效 Token 回傳 401。此 API 不提供寫入操作或 NAS session。
+
+### v0.4.27 — Metadata Catalog 同步修正
+
+詳細 metadata 請求沿用單張照片查詢已使用的欄位，移除額外的 `orientation_original` 請求，並分為最多 20 張的批次；NAS 拒絕批次或回傳不完整時拆分查詢。同步失敗會顯示階段、offset 和 NAS 錯誤代碼（若有）；未完成頁面不會標記完成，可由原 checkpoint 繼續。此變更不修改原始照片或標籤。
