@@ -393,3 +393,11 @@ ssh -i <private-key> -p 2223 root@127.0.0.1
 ```
 
 若使用不同 `DEBUG_SSH_PORT`，請同步調整第一行本機轉送埠與第二行連線埠。完成除錯後將 `DEBUG_SHELL` 設回 `false` 並重新建立容器；一般模式不會啟動容器內的 SSH server。
+
+### 唯讀 Metadata API（Llm-Cli-APIServer）
+
+此介面預設停用。管理者在本專案和 Llm-Cli-APIServer 的 .env 設定相同的 `PHOTO_TAGGER_API_TOKEN`（至少 32 字元，建議用 `python3 -c 'import secrets; print(secrets.token_urlsafe(48))'` 產生），並於 Photo Tagger 設定頁註冊受信任裝置供排程登入。設定持有人即為 API 查詢的個人照片空間帳號。請保護 Token，不得提交 Git；更換帳號時應旋轉 Token。重建容器後才會套用設定。
+
+Llm-Cli-APIServer 的 `PHOTO_TAGGER_API_URL` 設為 Photo Tagger 的 HTTPS 根網址（不是 DSM 網址）。呼叫：
+`GET /api/v1/metadata/photos?date_from=2026-11-12&date_to=2026-11-19&offset=0&limit=50`
+並送出 `Authorization: Bearer <token>` header。只允許 HTTPS、個人空間、最長 31 日區間及每頁 100 張。回傳拍攝時間、地點、GPS、描述與標籤，不回傳影像或人物辨識名單。依 next_offset 和 has_more 逐頁讀取；缺少日期或超出日期範圍的項目不回傳。未啟用、未註冊受信任裝置回傳 503；無效 Token 回傳 401。此 API 不提供寫入操作或 NAS session。

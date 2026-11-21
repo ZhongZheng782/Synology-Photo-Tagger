@@ -50,7 +50,7 @@ API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 NAS_SESSION_TTL_SECONDS = 12 * 60 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.4.20")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.4.21")
 TAGGER_DB_PATH = os.environ.get(
     "TAGGER_DB_PATH", os.path.join(os.path.dirname(__file__), "data", "photo-tagger.sqlite3")
 )
@@ -1197,6 +1197,100 @@ def discover():
             "details": failures,
         }
     ), 502
+
+
+def metadata_api_session() -> NasSession | None:
+    # Reuse only the explicitly registered trusted-device account.
+    credentials = encrypted_schedule_credentials()
+    if not credentials or credentials.get("base_url") != configured_base_url():
+        return None
+    username = credentials.get("username")
+    if not isinstance(username, str) or not username:
+        return None
+    owner = owner_key_for(configured_base_url(), username)
+
+    def lookup():
+        with _scheduled_nas_tokens_lock:
+            token = _scheduled_nas_tokens.get(owner)
+        with _nas_sessions_lock:
+            nas = _nas_sessions.get(token)
+            if nas and time.monotonic() - nas.last_used <= NAS_SESSION_TTL_SECONDS:
+                nas.last_used = time.monotonic()
+                return nas
+        return None
+
+    nas = lookup()
+    if nas is None:
+        restore_scheduled_nas_session()
+        nas = lookup()
+    return nas
+
+
+@app.get("/api/v1/metadata/photos")
+def read_only_metadata_api():
+    # A dedicated bearer token grants access to metadata only, not browser sessions.
+    configured = os.environ.get("PHOTO_TAGGER_API_TOKEN", "").strip()
+    if len(configured) < 32:
+        return jsonify({"ok": False, "error": "Metadata API disabled"}), 503
+    if not request.is_secure:
+        return jsonify({"ok": False, "error": "HTTPS required"}), 403
+    supplied = request.headers.get("Authorization", "")
+    if not secrets.compare_digest(supplied.encode("utf-8"), ("Bearer " + configured).encode("utf-8")):
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    try:
+        start = date.fromisoformat(request.args.get("date_from", ""))
+        end = date.fromisoformat(request.args.get("date_to", ""))
+        offset = int(request.args.get("offset", "0"))
+        limit = int(request.args.get("limit", "50"))
+        if not (0 <= (end - start).days <= 30 and 0 <= offset <= 100000 and 1 <= limit <= 100):
+            raise ValueError()
+        start_time = int(datetime.combine(start, datetime_time.min, tzinfo=timezone.utc).timestamp())
+        end_time = int(datetime.combine(end + timedelta(days=1), datetime_time.min, tzinfo=timezone.utc).timestamp()) - 1
+    except (ValueError, OverflowError):
+        return jsonify({"ok": False, "error": "Require valid date_from/date_to (max 31 days), offset and limit 1-100"}), 400
+
+    nas = metadata_api_session()
+    if nas is None:
+        return jsonify({"ok": False, "error": "Trusted-device authorization unavailable; register in Settings"}), 503
+    try:
+        api_name = "SYNO.Foto.Browse.Item"
+        url, version = api_endpoint(nas, api_name)
+        payload = post_synology(nas.client, url, {
+            "api": api_name, "version": min(version, 2), "method": "list_with_filter",
+            "offset": offset, "limit": limit, "sort_by": "takentime", "sort_direction": "asc",
+            "time": json.dumps([{"start_time": start_time, "end_time": end_time}]),
+            "item_type": json.dumps([-1]),
+            "additional": json.dumps(["description", "gps", "address", "tag"]),
+            "_sid": nas.sid,
+        })
+        data = payload.get("data")
+        items = data.get("list") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            raise SynologyApiError("Invalid photo list")
+        photos = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            summary = item_summary(item)
+            taken = photo_taken_date(summary)
+            if taken is None or not start <= taken <= end:
+                continue
+            metadata = item_metadata(item)
+            photos.append({
+                "id": summary["id"], "filename": summary["filename"], "time": summary["time"],
+                "date": taken.isoformat(),
+                **{key: metadata[key] for key in (
+                    "description", "latitude", "longitude", "country", "state", "county", "city",
+                    "district", "town", "village", "route", "landmark", "tags",
+                )},
+            })
+        response = jsonify({"ok": True, "space": "personal", "photos": photos,
+                            "offset": offset, "next_offset": offset + len(items),
+                            "has_more": len(items) >= limit})
+        response.headers["Cache-Control"] = "no-store"
+        return response
+    except (SynologyApiError, requests.exceptions.RequestException):
+        return jsonify({"ok": False, "error": "NAS metadata query failed"}), 502
 
 
 @app.get("/api/session")
