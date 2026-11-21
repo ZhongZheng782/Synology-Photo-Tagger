@@ -51,7 +51,7 @@ API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 NAS_SESSION_TTL_SECONDS = 12 * 60 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.4.22")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.4.23")
 PHOTO_TAGGER_AI_PROFILE_VERSION = 1
 PHOTO_TAGGER_AI_VERSION_TAG = f"Photo Tagger AI v{PHOTO_TAGGER_AI_PROFILE_VERSION}"
 PHOTO_TAGGER_AI_VERSION_PATTERN = re.compile(r"^Photo Tagger AI v([0-9]+)$", re.IGNORECASE)
@@ -228,6 +228,7 @@ def initialize_tag_job_db() -> None:
                 space TEXT NOT NULL,
                 photo_id INTEGER NOT NULL,
                 processed_at REAL NOT NULL,
+                source TEXT NOT NULL DEFAULT 'legacy_unknown',
                 PRIMARY KEY(owner_key, space, photo_id)
             );
             CREATE TABLE IF NOT EXISTS photo_tagger_processed_versions (
@@ -262,6 +263,9 @@ def initialize_tag_job_db() -> None:
             db.execute("ALTER TABLE tag_jobs ADD COLUMN skipped_processed_count INTEGER NOT NULL DEFAULT 0")
         if "skipped_version_count" not in job_columns:
             db.execute("ALTER TABLE tag_jobs ADD COLUMN skipped_version_count INTEGER NOT NULL DEFAULT 0")
+        processed_columns = {row["name"] for row in db.execute("PRAGMA table_info(photo_tagger_processed_photos)").fetchall()}
+        if "source" not in processed_columns:
+            db.execute("ALTER TABLE photo_tagger_processed_photos ADD COLUMN source TEXT NOT NULL DEFAULT 'legacy_unknown'")
         item_columns = {row["name"] for row in db.execute("PRAGMA table_info(tag_job_items)").fetchall()}
         if "reviewed_tag" not in item_columns:
             db.execute("ALTER TABLE tag_job_items ADD COLUMN reviewed_tag TEXT")
@@ -2005,8 +2009,8 @@ def record_photo_tagger_tags(owner_key: str, space: str, photo_id: int, tag_name
 def record_photo_tagger_processed(owner_key: str, space: str, photo_id: int) -> None:
     with tag_job_db() as db:
         db.execute(
-            "INSERT INTO photo_tagger_processed_photos(owner_key, space, photo_id, processed_at) VALUES(?,?,?,?) "
-            "ON CONFLICT(owner_key, space, photo_id) DO UPDATE SET processed_at=excluded.processed_at",
+            "INSERT INTO photo_tagger_processed_photos(owner_key, space, photo_id, processed_at, source) VALUES(?,?,?,?,'ai') "
+            "ON CONFLICT(owner_key, space, photo_id) DO UPDATE SET processed_at=excluded.processed_at, source='ai'",
             (owner_key, space, photo_id, time.time()),
         )
 
@@ -2043,7 +2047,7 @@ def has_any_photo_tagger_version(tags: object) -> bool:
 def photo_tagger_processed_ids(db: sqlite3.Connection, owner_key: str, space: str) -> set[int]:
     """Return photos with verified Photo Tagger AI output, including older AI job records."""
     rows = db.execute(
-        "SELECT photo_id FROM photo_tagger_processed_photos WHERE owner_key=? AND space=?",
+        "SELECT photo_id FROM photo_tagger_processed_photos WHERE owner_key=? AND space=? AND source='ai'",
         (owner_key, space),
     ).fetchall()
     processed = {int(row["photo_id"]) for row in rows}
@@ -4263,7 +4267,7 @@ def write_photo_analysis(photo_id: int):
         except sqlite3.Error:
             # A provenance index failure must not convert a verified Photos API write into an apparent failure.
             app.logger.exception("Could not record Photo Tagger tag provenance for item %s", photo_id)
-    if success and owner_key:
+    if success and owner_key and photo_tagger_ai_write:
         try:
             record_photo_tagger_processed(owner_key, space, photo_id)
         except sqlite3.Error:

@@ -146,7 +146,7 @@
           <p class="module-intro">將舊版或尚無版本標記的照片重新分析。有效結果透過 Photos API 寫入並讀回核對後，才加入 <strong>Photo Tagger AI v1</strong>。沿用既有描述保護規則；非空描述不會被覆寫。版本標記代表已由此 AI 標記設定處理，不等於 Docker 映像版本。</p>
           <div class="tag-job-controls version-upgrade-controls">
             <label>照片空間<select id="upgrade-space"><option value="personal">個人空間</option><option value="shared">共享空間</option></select></label>
-            <label>升級來源<select id="upgrade-source"><option value="legacy_records">Photo Tagger 已記錄的成功處理照片（無版本標記）</option><option value="older_version_tag">指定舊版標記</option><option value="filtered_unversioned">依條件挑選未標記新版的照片</option></select></label>
+            <label>升級來源<select id="upgrade-source"><option value="legacy_records">Photo Tagger 可確認的 AI 成功紀錄（無版本標記）</option><option value="older_version_tag">指定舊版標記</option><option value="filtered_unversioned">依條件挑選未標記新版的照片</option></select></label>
             <label id="upgrade-version-field" hidden>舊版標記<select id="upgrade-version-tag" disabled><option value="">先載入版本標記</option></select></label>
             <button class="secondary-button" id="load-upgrade-versions" type="button" hidden>載入舊版標記</button>
             <div id="upgrade-filter-fields" class="upgrade-filter-fields" hidden>
@@ -594,7 +594,7 @@
           select.disabled = true;
           document.getElementById('upgrade-job-notice').hidden = false;
           const currentVersion = document.getElementById('version-upgrade-work-form').dataset.currentVersion;
-          document.getElementById('upgrade-job-notice').textContent = `目前 AI 標記版本是 v${currentVersion}，尚無較舊的版本標記。要轉換既有無版本照片，請選「Photo Tagger 已記錄的成功處理照片」。`;
+          document.getElementById('upgrade-job-notice').textContent = `目前 AI 標記版本是 v${currentVersion}，尚無較舊的版本標記。要轉換既有無版本照片，請選「Photo Tagger 可確認的 AI 成功紀錄」。`;
         } else select.disabled = false;
       } catch (error) {
         select.replaceChildren(new Option(error.message || '載入失敗',''));
@@ -1552,7 +1552,7 @@
       const tags = criteria.tags || (criteria.tag ? [criteria.tag] : []);
       if (tags.length) filters.push(tags[0] === '__untagged__' ? '未加標籤' : `標籤：${tags.join('、')}`);
       const currentVersion = document.getElementById('version-upgrade-work-form')?.dataset.currentVersion || '1';
-      if (criteria.upgrade_source === 'legacy_records') filters.push(`升級 Photo Tagger 舊版成功紀錄至 v${currentVersion}`);
+      if (criteria.upgrade_source === 'legacy_records') filters.push(`升級 Photo Tagger 可確認的 AI 成功紀錄至 v${currentVersion}`);
       else if (criteria.upgrade_source === 'older_version_tag') filters.push(`升級 ${criteria.source_version_tag || '舊版標記'} 至 v${currentVersion}`);
       else if (criteria.upgrade_source === 'filtered_unversioned') filters.push(`升級篩選出的未標記照片至 v${currentVersion}`);
       if (criteria.skip_processed) filters.push('略過已有 AI 輸出的照片');
