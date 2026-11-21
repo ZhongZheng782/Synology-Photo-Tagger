@@ -16,6 +16,14 @@ DETAIL_BATCH_SIZE = 100
 MAX_QUERY_LIMIT = 100
 
 
+class _ClosingConnection(sqlite3.Connection):
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 def default_catalog_path() -> str:
     configured = os.environ.get("PHOTO_CATALOG_DB_PATH", "").strip()
     if configured:
@@ -30,10 +38,10 @@ CATALOG_DB_PATH = default_catalog_path()
 def connect_catalog(path: str = CATALOG_DB_PATH, *, readonly: bool = False) -> sqlite3.Connection:
     target = Path(path)
     if readonly:
-        connection = sqlite3.connect(f"file:{target.resolve()}?mode=ro", uri=True, timeout=30)
+        connection = sqlite3.connect(f"file:{target.resolve()}?mode=ro", uri=True, timeout=30, factory=_ClosingConnection)
     else:
         target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        connection = sqlite3.connect(path, timeout=30)
+        connection = sqlite3.connect(path, timeout=30, factory=_ClosingConnection)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     connection.execute("PRAGMA busy_timeout = 30000")
