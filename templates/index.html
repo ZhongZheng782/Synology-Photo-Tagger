@@ -1654,6 +1654,14 @@
         const state = document.createElement('small');
         state.textContent = `${tagJobStatusText(item.status)}${item.attempts ? ` · 分析 ${item.attempts} 次` : ''}`;
         content.append(heading, state);
+        if (job.criteria?.work_type === 'travel_stay' && photo.gps_cluster_id) {
+          const sampling = document.createElement('small');
+          const hasGps = photo.latitude !== null && photo.longitude !== null && Number.isFinite(Number(photo.latitude)) && Number.isFinite(Number(photo.longitude));
+          sampling.textContent = hasGps
+            ? `${photo.gps_cluster_id} · GPS 位置群組 ${photo.gps_cluster_size || 1} 張 · ${photo.analysis_sample ? 'MLX 代表樣本' : '未送 MLX（同群取樣）'}`
+            : `缺 GPS · ${photo.analysis_sample ? '獨立 MLX 樣本' : '未送 MLX'}`;
+          content.append(sampling);
+        }
         if (item.analysis) {
           const analysis = item.analysis;
           const outcome = document.createElement('p');
@@ -1996,8 +2004,12 @@
       document.getElementById('tag-job-title').textContent = `${isTravel ? '旅行住宿辨識' : 'AI 標記工作'} · ${tagJobCriteriaLabel(job.criteria)} · ${job.id.slice(0, 8)}`;
       const report = document.getElementById('tag-job-report');
       const counts = job.counts;
+      const travelSampling = job.criteria?.analysis_sampling;
+      const travelUnsampled = isTravel ? items.filter(item => item.photo.analysis_sample === false).length : 0;
+      const travelAttemptSummary = Number.isInteger(travelSampling?.actual_analysis_attempts)
+        ? `　分析嘗試 ${travelSampling.actual_analysis_attempts} 次（失敗 ${travelSampling.actual_analysis_failures || 0}）` : '';
       report.textContent = isTravel
-        ? `狀態：${tagJobStatusText(job.status)}　候選 ${counts.candidates}　已分析 ${counts.analyzed}　待確認 ${items.filter(item => item.status === 'analyzed' && item.review === 'pending').length}　已確認 ${items.filter(item => item.review === 'accepted').length}　已排除 ${items.filter(item => item.review === 'rejected').length}　失敗 ${counts.failed}　唯讀`
+        ? `狀態：${tagJobStatusText(job.status)}　候選 ${counts.candidates}${travelSampling ? `　GPS 照片 ${travelSampling.gps_photo_count}　GPS 群組 ${travelSampling.gps_cluster_count}　代表樣本 ${travelSampling.analysis_sample_count}（預估減少 ${travelSampling.analysis_call_reduction_percent}% 分析）${travelAttemptSummary}　同群略過 ${travelUnsampled}` : ''}　已分析 ${counts.analyzed}　待確認 ${items.filter(item => item.status === 'analyzed' && item.review === 'pending').length}　已確認 ${items.filter(item => item.review === 'accepted').length}　已排除 ${items.filter(item => item.review === 'rejected').length}　失敗 ${counts.failed}　唯讀`
         : `狀態：${tagJobStatusText(job.status)}　候選 ${counts.candidates}　候選排除已有 AI 輸出 ${job.skipped_processed_count || 0} 張　排除已標記新版 ${job.skipped_version_count || 0} 張　已分析 ${counts.analyzed}　已略過 ${counts.skipped}　分析失敗 ${counts.failed}　需核對 ${counts.needs_review}　已寫入 ${counts.written}　Dry run ${counts.dry_run}`;
       renderTravelStaySummary(job, payload.travel_groups || [], payload.travel_candidates || []);
       if (isTravel && payload.external_evidence?.length) {
@@ -2166,7 +2178,7 @@
             max_candidates: Number(document.getElementById('travel-limit').value),
           }),
         });
-        notice.textContent = `已固定 ${payload.candidate_count} 張候選照片（本機目錄符合 ${payload.source_count} 張）；尚未分析或寫入。`;
+        notice.textContent = `已固定 ${payload.candidate_count} 張候選照片（本機目錄符合 ${payload.source_count} 張）；GPS-first 預設不下載原圖、不呼叫 MLX，請核對住宿候選。`;
         await loadTagJobs(); await openTagJob(payload.job_id);
       } catch (error) { notice.textContent = error.message || '無法建立住宿工作。'; }
       finally { button.disabled = false; }

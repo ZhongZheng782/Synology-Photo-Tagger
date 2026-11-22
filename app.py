@@ -2435,6 +2435,89 @@ def travel_candidate_priority(photo: dict) -> int:
     return score
 
 
+def travel_gps_distance_m(left: dict, right: dict) -> float | None:
+    try:
+        lat1, lon1 = float(left.get("latitude")), float(left.get("longitude"))
+        lat2, lon2 = float(right.get("latitude")), float(right.get("longitude"))
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(value) for value in (lat1, lon1, lat2, lon2)):
+        return None
+    if not (-90 <= lat1 <= 90 and -180 <= lon1 <= 180 and -90 <= lat2 <= 90 and -180 <= lon2 <= 180):
+        return None
+    radius_m = 6_371_000
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    delta_phi, delta_lambda = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
+    haversine = math.sin(delta_phi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2) ** 2
+    return radius_m * 2 * math.asin(min(1.0, math.sqrt(haversine)))
+
+
+def plan_travel_analysis_samples(photos: list[dict], job_id: str, radius_m: float = 75.0,
+                                 max_time_gap_s: float = 48 * 60 * 60) -> tuple[list[dict], dict]:
+    """Cluster nearby GPS photos locally and choose a few MLX samples per location cluster."""
+    def timestamp_seconds(value):
+        try:
+            timestamp = float(value)
+        except (TypeError, ValueError):
+            return None
+        return timestamp / 1000 if timestamp > 100_000_000_000 else timestamp
+
+    ordered = sorted(photos, key=lambda photo: (timestamp_seconds(photo.get("taken_time")) or 0, int(photo["photo_id"])))
+    clusters: list[list[dict]] = []
+    for photo in ordered:
+        taken_time = timestamp_seconds(photo.get("taken_time"))
+        matching = None
+        if photo.get("latitude") is not None and photo.get("longitude") is not None:
+            for cluster in clusters:
+                anchor = cluster[0]
+                distance_m = travel_gps_distance_m(photo, anchor)
+                if distance_m is None or distance_m > radius_m:
+                    continue
+                anchor_time = timestamp_seconds(anchor.get("taken_time"))
+                if taken_time is None or anchor_time is None or abs(taken_time - anchor_time) > max_time_gap_s:
+                    continue
+                matching = cluster
+                break
+        if matching is None:
+            clusters.append([photo])
+        else:
+            matching.append(photo)
+
+    enriched: list[dict] = []
+    sample_count = 0
+    gps_photo_count = sum(travel_gps_distance_m(photo, photo) is not None for photo in photos)
+    for cluster_index, cluster in enumerate(clusters, start=1):
+        has_gps = any(travel_gps_distance_m(photo, photo) is not None for photo in cluster)
+        cluster_prefix = "gps-" if has_gps else "nogps-"
+        cluster_id = cluster_prefix + hashlib.sha256(f"{job_id}:{cluster_index}:{cluster[0]['photo_id']}".encode("utf-8")).hexdigest()[:10]
+        desired_samples = 1 if len(cluster) < 8 else 2 if len(cluster) <= 30 else 3
+        ranked = sorted(cluster, key=lambda photo: (-travel_candidate_priority(photo), -(timestamp_seconds(photo.get("taken_time")) or 0), -int(photo["photo_id"])))
+        chosen = [ranked.pop(0)]
+        while ranked and len(chosen) < desired_samples:
+            next_photo = max(ranked, key=lambda photo: (
+                min(abs((timestamp_seconds(photo.get("taken_time")) or 0) - (timestamp_seconds(item.get("taken_time")) or 0)) for item in chosen),
+                travel_candidate_priority(photo), timestamp_seconds(photo.get("taken_time")) or 0, int(photo["photo_id"]),
+            ))
+            ranked.remove(next_photo)
+            chosen.append(next_photo)
+        chosen_ids = {int(photo["photo_id"]) for photo in chosen}
+        sample_count += len(chosen_ids)
+        for photo in cluster:
+            item = dict(photo)
+            item.update({"gps_cluster_id": cluster_id, "gps_cluster_size": len(cluster),
+                         "analysis_sample": int(photo["photo_id"]) in chosen_ids,
+                         "analysis_sample_photo_ids": sorted(chosen_ids),
+                         "analysis_sample_reason": "位置群組代表樣本；距離與拍攝時間只用於本機分群。" if int(photo["photo_id"]) in chosen_ids else
+                         "同一 GPS／時間群組的非代表照片；為減少重複 MLX 呼叫，本工作未送出分析。"})
+            enriched.append(item)
+    reduction = round((1 - sample_count / len(photos)) * 100, 1) if photos else 0.0
+    gps_cluster_count = sum(any(travel_gps_distance_m(photo, photo) is not None for photo in cluster) for cluster in clusters)
+    return enriched, {"gps_cluster_count": gps_cluster_count, "gps_photo_count": gps_photo_count,
+                      "no_gps_photo_count": len(photos) - gps_photo_count,
+                      "analysis_sample_count": sample_count, "analysis_call_reduction_percent": reduction,
+                      "gps_cluster_radius_m": radius_m, "gps_cluster_max_time_gap_hours": max_time_gap_s / 3600}
+
+
 def safe_travel_analysis(raw_output: str) -> dict:
     text = raw_output.strip()
     if text.startswith("```"):
@@ -2484,7 +2567,7 @@ def travel_photo_day(photo: dict) -> date | None:
         return None
 
 
-def build_travel_group_payload(job_id: str, items: list[dict]) -> dict:
+def build_travel_group_payload(job_id: str, items: list[dict], external_evidence=()) -> dict:
     dated = []
     undated = []
     for item in items:
@@ -2563,6 +2646,43 @@ def build_travel_group_payload(job_id: str, items: list[dict]) -> dict:
         candidate["source_url"] = None
         candidate["reason"] = "按旅行時間群組與辨識名稱彙整；不代表實際入住。"
         candidate.pop("items", None)
+    # External evidence is independent of AI output. Never infer a stay from a booking or date overlap alone.
+    for evidence in external_evidence:
+        if evidence.get("booking_status") == "cancelled":
+            continue
+        name = evidence["hotel_name"]
+        for group in groups:
+            date_range = group["photo_date_range"]
+            if not date_range["from"] or evidence["check_out"] < date_range["from"] or evidence["check_in"] > date_range["to"]:
+                continue
+            if group.get("country") and canonical_travel_country(group["country"]) != canonical_travel_country(evidence["country"]):
+                continue
+            key = hashlib.sha256(f"{group['trip_group_id']}:{name.strip().casefold()}".encode()).hexdigest()[:24]
+            if key not in candidates:
+                candidates[key] = {"candidate_key": key, "trip_group_id": group["trip_group_id"],
+                    "source_hotel_name": name, "hotel_name": name, "city": evidence.get("city"),
+                    "evidence_photo_ids": [], "evidence_types": [], "photo_date_range": {"from": None, "to": None},
+                    "stay_dates": {"check_in": None, "check_out": None}, "hotel_name_source": "外部住宿證據",
+                    "address": None, "source_url": None, "review_status": "needs_review",
+                    "reason": "外部證據與旅行日期重疊；尚未確認 GPS 或實際入住。"}
+            candidate = candidates[key]
+            events = candidate.setdefault("external_evidence_ids", [])
+            if evidence["evidence_id"] not in events:
+                events.append(evidence["evidence_id"])
+            candidate["evidence_types"] = sorted(set(candidate["evidence_types"]) | {evidence["evidence_type"]})
+            matches = [item for item in enriched_items if item["trip_group_id"] == group["trip_group_id"]
+                       and item.get("review") != "rejected" and item.get("photo_date")
+                       and evidence["check_in"] <= item["photo_date"] <= evidence["check_out"]
+                       and (distance := travel_gps_distance_m(item["photo"], evidence)) is not None and distance <= 75]
+            if matches:
+                candidate["evidence_photo_ids"] = sorted(set(candidate["evidence_photo_ids"]) | {item["photo"]["id"] for item in matches})
+                candidate["evidence_types"] = sorted(set(candidate["evidence_types"]) | {"gps_date_match"})
+                days = sorted(item["photo_date"] for item in enriched_items if item["photo"]["id"] in candidate["evidence_photo_ids"] and item.get("photo_date"))
+                candidate["photo_date_range"] = {"from": days[0], "to": days[-1]}
+                candidate["reason"] = "飯店座標與日期範圍內照片 GPS 相近；可能路過，須人工確認。"
+            if any(e.get("booking_status") == "cancelled" and e["hotel_name"].strip().casefold() == name.strip().casefold()
+                   and e["check_in"] <= evidence["check_out"] and e["check_out"] >= evidence["check_in"] for e in external_evidence):
+                candidate["reason"] = "同飯店有取消事件；尚無逐筆訂房識別，不自動判定或排除入住。"
     return {"groups": groups, "items": enriched_items, "candidates": list(candidates.values())}
 
 
@@ -2622,17 +2742,28 @@ def create_travel_job():
                 break
         gathered = list(gathered_by_id.values())
         gathered.sort(key=lambda photo: (-travel_candidate_priority(photo), -(photo.get("taken_time") or 0), -photo["photo_id"]))
-        selected = gathered[:limit]
     except (ValueError, TypeError, sqlite3.Error):
         app.logger.exception("Could not query catalog for travel stay job")
         return jsonify({"ok": False, "error": "無法查詢本機 metadata 目錄。"}), 500
     job_id, now = uuid.uuid4().hex, time.time()
-    criteria = {"work_type": "travel_stay", "country": country, "date_from": date_from, "date_to": date_to,
+    selected = gathered[:limit]
+    sample_metrics = None
+    if selected:
+        selected, sample_metrics = plan_travel_analysis_samples(selected, job_id)
+    for photo in selected:
+        photo.update({"analysis_sample": False, "analysis_sample_photo_ids": [],
+                      "analysis_sample_reason": "GPS-first：預設不下載原圖或呼叫 MLX。"})
+    sample_metrics = {**(sample_metrics or {}), "analysis_sample_count": 0,
+                      "analysis_call_reduction_percent": 100.0 if selected else 0.0,
+                      "actual_analysis_attempts": 0, "actual_analysis_successes": 0, "actual_analysis_failures": 0}
+    criteria = {"work_type": "travel_stay", "analysis_mode": "metadata_only", "country": country, "date_from": date_from, "date_to": date_to,
                 "max_candidates": limit, "source_count": len(gathered), "source_truncated": source_truncated,
                 "catalog_last_success_at": catalog_status.get("last_success_at")}
+    if sample_metrics:
+        criteria["analysis_sampling"] = sample_metrics
     with tag_job_db() as db:
         db.execute(
-            "INSERT INTO tag_jobs(id,owner_key,space,task,criteria_json,status,snapshot_complete,candidate_count,scanned_count,error,created_at,updated_at) VALUES(?,?,?,?,?,'ready',?,?,?,?,?,?)",
+            "INSERT INTO tag_jobs(id,owner_key,space,task,criteria_json,status,snapshot_complete,candidate_count,scanned_count,error,created_at,updated_at) VALUES(?,?,?,?,?,'review',?,?,?,?,?,?)",
             (job_id, owner_key, space, "travel_stay", json.dumps(criteria, ensure_ascii=False), int(not source_truncated), len(selected), len(gathered),
              "本機目錄符合照片超過 10,000 張；候選優先從最新 10,000 張中選取，請縮小日期或國家條件。" if source_truncated else None, now, now),
         )
@@ -2642,11 +2773,18 @@ def create_travel_job():
                        "thumbnail_unit_id": photo.get("thumbnail_unit_id"), "thumbnail_size": photo.get("thumbnail_size") or "m",
                        "country": photo.get("country"), "city": photo.get("city"), "latitude": photo.get("latitude"),
                        "longitude": photo.get("longitude"), "tags": photo.get("tags", []),
+                       "gps_cluster_id": photo.get("gps_cluster_id"), "gps_cluster_size": photo.get("gps_cluster_size"),
+                       "analysis_sample": photo.get("analysis_sample", True),
+                       "analysis_sample_photo_ids": photo.get("analysis_sample_photo_ids", [photo["photo_id"]]),
+                       "analysis_sample_reason": photo.get("analysis_sample_reason"),
                        "candidate_reason": "依既有標籤／描述、GPS 與描述完整度排序納入；此排序不是住宿證據。"}
-            db.execute("INSERT INTO tag_job_items(job_id,photo_id,photo_json,updated_at) VALUES(?,?,?,?)",
-                       (job_id, photo["photo_id"], json.dumps(snapshot, ensure_ascii=False), now))
-    return jsonify({"ok": True, "job_id": job_id, "status": "ready", "candidate_count": len(selected),
-                    "source_count": len(gathered), "snapshot_complete": not source_truncated}), 201
+            sample = snapshot["analysis_sample"]
+            db.execute("INSERT INTO tag_job_items(job_id,photo_id,photo_json,status,error,updated_at) VALUES(?,?,?,?,?,?)",
+                       (job_id, photo["photo_id"], json.dumps(snapshot, ensure_ascii=False),
+                        "pending" if sample else "skipped", None if sample else snapshot["analysis_sample_reason"], now))
+    return jsonify({"ok": True, "job_id": job_id, "status": "review", "candidate_count": len(selected),
+                    "source_count": len(gathered), "snapshot_complete": not source_truncated,
+                    "analysis_sampling": sample_metrics}), 201
 
 
 def find_travel_candidate(db: sqlite3.Connection, owner_key: str, job_id: str, candidate_key: str):
@@ -2656,7 +2794,7 @@ def find_travel_candidate(db: sqlite3.Connection, owner_key: str, job_id: str, c
     rows = db.execute("SELECT photo_id,photo_json,status,review,analysis_json FROM tag_job_items WHERE job_id=?", (job_id,)).fetchall()
     items = [{"photo": json.loads(row["photo_json"]), "status": row["status"], "review": row["review"],
               "analysis": json.loads(row["analysis_json"]) if row["analysis_json"] else None} for row in rows]
-    travel = build_travel_group_payload(job_id, items)
+    travel = build_travel_group_payload(job_id, items, read_external_evidence(db, job_id) if json.loads(job["criteria_json"]).get("analysis_mode") == "metadata_only" else ())
     candidate = next((item for item in travel["candidates"] if item["candidate_key"] == candidate_key), None)
     if not candidate:
         return job, None, None
@@ -2882,7 +3020,7 @@ def tag_job_detail_payload(db: sqlite3.Connection, owner_key: str, job_id: str) 
     result = {"job": tag_job_summary(db, job), "items": items}
     criteria = json.loads(job["criteria_json"])
     if criteria.get("work_type") == "travel_stay":
-        travel = build_travel_group_payload(job_id, items)
+        travel = build_travel_group_payload(job_id, items, read_external_evidence(db, job_id) if criteria.get("analysis_mode") == "metadata_only" else ())
         for group in travel["groups"]:
             db.execute("INSERT OR IGNORE INTO travel_stay_trip_reviews(job_id,trip_group_id,updated_at) VALUES(?,?,?)",
                        (job_id, group["trip_group_id"], time.time()))
@@ -2922,6 +3060,8 @@ def tag_job_detail_payload(db: sqlite3.Connection, owner_key: str, job_id: str) 
         by_photo_id = {item.get("photo", {}).get("id"): item.get("photo", {}).get("trip_group_id") for item in travel["items"]}
         for item in result["items"]:
             item["photo"]["trip_group_id"] = by_photo_id.get(item["photo"].get("id"))
+            day = travel_photo_day(item["photo"])
+            item["photo"]["photo_date"] = day.isoformat() if day else None
     return result
 
 
@@ -3578,6 +3718,17 @@ def get_tag_job_detail(job_id: str):
     return jsonify({"ok": True, **detail})
 
 
+def complete_metadata_travel_job(job_id: str, owner_key: str) -> bool:
+    with tag_job_db() as db:
+        job = get_tag_job(db, owner_key, job_id)
+        if not job or json.loads(job["criteria_json"]).get("analysis_mode") != "metadata_only":
+            return False
+        if job["status"] not in {"ready", "review"}:
+            return False
+        db.execute("UPDATE tag_jobs SET status='review',updated_at=? WHERE id=?", (time.time(), job_id))
+        return True
+
+
 def queue_tag_job_analysis(job_id: str, owner_key: str, nas_token: str) -> tuple[bool, str | None]:
     with _tag_job_submit_lock, tag_job_db() as db:
         job = get_tag_job(db, owner_key, job_id)
@@ -3585,15 +3736,20 @@ def queue_tag_job_analysis(job_id: str, owner_key: str, nas_token: str) -> tuple
             return False, "找不到此標記工作。"
         if job["status"] in {"preparing", "analyzing", "writing", "undoing"}:
             return False, "此工作目前正在處理中。"
-        items = db.execute(
-            "SELECT COUNT(*) FROM tag_job_items WHERE job_id=? AND status IN ('pending','failed')", (job_id,)
-        ).fetchone()[0]
-        if not items:
+        eligible_rows = db.execute(
+            "SELECT photo_id,photo_json FROM tag_job_items WHERE job_id=? AND status IN ('pending','failed')", (job_id,)
+        ).fetchall()
+        work_type = json.loads(job["criteria_json"]).get("work_type")
+        if work_type == "travel_stay":
+            eligible_rows = [row for row in eligible_rows if json.loads(row["photo_json"]).get("analysis_sample", True)]
+        if not eligible_rows:
             return False, "沒有待分析或可安全重跑的照片。"
-        db.execute(
-            "UPDATE tag_job_items SET status='queued', review='pending', error=NULL, updated_at=? "
-            "WHERE job_id=? AND status IN ('pending','failed')", (time.time(), job_id),
-        )
+        now = time.time()
+        for row in eligible_rows:
+            db.execute(
+                "UPDATE tag_job_items SET status='queued', review='pending', error=NULL, updated_at=? WHERE job_id=? AND photo_id=?",
+                (now, job_id, row["photo_id"]),
+            )
         db.execute("UPDATE tag_jobs SET status='analyzing', error=NULL, updated_at=? WHERE id=?", (time.time(), job_id))
         try:
             _photo_analysis_executor.submit(run_tag_job_analysis, job_id, owner_key, nas_token)
@@ -3733,6 +3889,19 @@ def run_tag_job_analysis(job_id: str, owner_key: str, nas_token: str) -> None:
                 "SELECT SUM(status='queued') AS queued, SUM(status='running') AS running, SUM(status='writing') AS writing, SUM(status='failed') AS failed, SUM(status='write_uncertain') AS uncertain "
                 "FROM tag_job_items WHERE job_id=?", (job_id,),
             ).fetchone()
+            if criteria.get("work_type") == "travel_stay":
+                sample_rows = db.execute(
+                    "SELECT photo_json,status,attempts,analysis_json FROM tag_job_items WHERE job_id=?", (job_id,)
+                ).fetchall()
+                sample_rows = [row for row in sample_rows if json.loads(row["photo_json"]).get("analysis_sample", True)]
+                updated_criteria = dict(criteria)
+                sampling = dict(updated_criteria.get("analysis_sampling") or {})
+                sampling.update({"actual_analysis_attempts": sum(row["attempts"] or 0 for row in sample_rows),
+                                 "actual_analysis_successes": sum(row["analysis_json"] is not None for row in sample_rows),
+                                 "actual_analysis_failures": sum(row["status"] == "failed" for row in sample_rows)})
+                updated_criteria["analysis_sampling"] = sampling
+                db.execute("UPDATE tag_jobs SET criteria_json=? WHERE id=?",
+                           (json.dumps(updated_criteria, ensure_ascii=False), job_id))
             status = (
                 "analyzing" if counts["queued"] or counts["running"] or counts["writing"] else
                 "needs_attention" if counts["failed"] or counts["uncertain"] else
@@ -3761,6 +3930,8 @@ def run_tag_job_analysis(job_id: str, owner_key: str, nas_token: str) -> None:
 def analyze_tag_job(job_id: str):
     if not current_nas_session():
         return jsonify({"ok": False, "error": "請先登入 Synology Photos。"}), 401
+    if complete_metadata_travel_job(job_id, tag_job_owner_key() or ""):
+        return jsonify({"ok": True, "status": "review"}), 200
     if not MLX_SERVER_API_KEY:
         return jsonify({"ok": False, "error": "尚未設定本機 MLX API key。"}), 503
     if len(job_id) != 32 or any(char not in "0123456789abcdef" for char in job_id):
@@ -4001,7 +4172,7 @@ def read_external_evidence(db, job_id):
 
 def normalize_external_evidence(body, criteria):
     fields = {"source", "evidence_type", "hotel_name", "country", "city", "address",
-              "check_in", "check_out", "booking_status", "source_reference", "verification_status"}
+              "check_in", "check_out", "booking_status", "source_reference", "verification_status", "latitude", "longitude"}
     if not isinstance(body, dict) or set(body) - fields:
         raise ValueError("只接受結構化住宿證據欄位；不可傳送郵件內文或帳密。")
     events = {"booking_confirmation": "booked", "check_in_confirmation": "checked_in",
@@ -4025,6 +4196,10 @@ def normalize_external_evidence(body, criteria):
         raise ValueError("住宿日期無效或不在旅行工作範圍。")
     if body.get("verification_status", "verified") != "verified":
         raise ValueError("只匯入已由來源查證的證據。")
+    if "latitude" in body or "longitude" in body:
+        if isinstance(body.get("latitude"), bool) or isinstance(body.get("longitude"), bool) or travel_gps_distance_m(body, body) is None:
+            raise ValueError("飯店座標格式無效。")
+        clean.update(latitude=float(body["latitude"]), longitude=float(body["longitude"]))
     return {**clean, "source": body["source"], "evidence_type": body["evidence_type"],
             "booking_status": body["booking_status"], "check_in": start.isoformat(), "check_out": end.isoformat(),
             "verification_status": "verified", "review_status": "needs_review"}
@@ -4147,6 +4322,8 @@ def start_external_travel_job(job_id: str):
             return jsonify({"ok": False, "error": "找不到此旅行住宿工作。"}), 404
         if job["status"] in {"preparing", "analyzing"}:
             return jsonify({"ok": True, "job_id": job_id, "status": job["status"], "already_running": True}), 202
+    if complete_metadata_travel_job(job_id, owner_key):
+        return jsonify({"ok": True, "job_id": job_id, "status": "review"}), 200
     if not MLX_SERVER_API_KEY:
         return jsonify({"ok": False, "error": "尚未設定本機 MLX API key。"}), 503
     ok, message = queue_tag_job_analysis(job_id, owner_key, nas_token)

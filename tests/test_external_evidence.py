@@ -44,6 +44,27 @@ class ExternalEvidenceTests(unittest.TestCase):
         with patch.object(tagger, "metadata_api_owner_context", return_value=("other", "user")):
             self.assertEqual(self.call("GET").status_code, 404)
 
+    def test_metadata_only_gps_match_and_no_mlx(self):
+        self.criteria["analysis_mode"] = "metadata_only"
+        with tagger.tag_job_db() as db:
+            db.execute("UPDATE tag_jobs SET criteria_json=? WHERE id=?", (json.dumps(self.criteria), self.job))
+            timestamp = tagger.datetime(2026, 11, 12, 12, tzinfo=tagger.timezone.utc).timestamp()
+            photo = dict(id=123, filename="test.jpg", time=timestamp, country="Japan", latitude=35.0, longitude=135.0)
+            db.execute("INSERT INTO tag_job_items(job_id,photo_id,photo_json,status,updated_at) VALUES(?,?,?,?,?)",
+                       (self.job, 123, json.dumps(photo), "skipped", time.time()))
+        self.assertEqual(self.call("POST", {**self.body, "latitude": 35.0, "longitude": 135.0}).status_code, 201)
+        with patch.object(tagger, "MLX_SERVER_API_KEY", ""), patch.object(tagger, "queue_tag_job_analysis") as queue:
+            self.assertTrue(tagger.complete_metadata_travel_job(self.job, "owner"))
+            queue.assert_not_called()
+        with tagger.tag_job_db() as db:
+            detail = tagger.tag_job_detail_payload(db, "owner", self.job)
+        self.assertEqual(detail["job"]["status"], "review")
+        candidate = detail["travel_candidates"][0]
+        self.assertIn("gps_date_match", candidate["evidence_types"])
+        self.assertEqual(candidate["evidence_photo_ids"], [123])
+        self.assertEqual(candidate["review_status"], "needs_review")
+        self.assertIsNone(candidate["stay_dates"]["check_in"])
+
     def test_scope_and_validation(self):
         for bad in ({"raw_email": "private"}, {"check_in": "2025-11-12", "check_out": "2025-11-16"}, {"booking_status": "cancelled"}, {"country": "Korea"}):
             self.assertEqual(self.call("POST", {**self.body, **bad}).status_code, 400)
