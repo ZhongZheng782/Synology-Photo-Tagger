@@ -59,7 +59,7 @@ API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 NAS_SESSION_TTL_SECONDS = 12 * 60 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.4.28")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.4.29")
 PHOTO_TAGGER_AI_PROFILE_VERSION = 1
 PHOTO_TAGGER_AI_VERSION_TAG = f"Photo Tagger AI v{PHOTO_TAGGER_AI_PROFILE_VERSION}"
 PHOTO_TAGGER_AI_VERSION_PATTERN = re.compile(r"^Photo Tagger AI v([0-9]+)$", re.IGNORECASE)
@@ -265,6 +265,13 @@ def initialize_tag_job_db() -> None:
                 review_status TEXT NOT NULL DEFAULT 'needs_review',
                 updated_at REAL NOT NULL,
                 PRIMARY KEY(job_id, candidate_key)
+            );
+            CREATE TABLE IF NOT EXISTS travel_external_evidence (
+                job_id TEXT NOT NULL REFERENCES tag_jobs(id) ON DELETE CASCADE,
+                evidence_id TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                PRIMARY KEY(job_id, evidence_id)
             );
             CREATE TABLE IF NOT EXISTS travel_stay_trip_reviews (
                 job_id TEXT NOT NULL REFERENCES tag_jobs(id) ON DELETE CASCADE,
@@ -2910,6 +2917,7 @@ def tag_job_detail_payload(db: sqlite3.Connection, owner_key: str, job_id: str) 
                 candidate["source_url"] = candidate["selected_place"].get("osm_url") if candidate.get("selected_place") else None
         result["travel_groups"] = travel["groups"]
         result["travel_candidates"] = travel["candidates"]
+        result["external_evidence"] = read_external_evidence(db, job_id)
         # Keep photo card snapshots associated with the same suggested trip grouping.
         by_photo_id = {item.get("photo", {}).get("id"): item.get("photo", {}).get("trip_group_id") for item in travel["items"]}
         for item in result["items"]:
@@ -3852,6 +3860,7 @@ def download_travel_job_report(job_id: str):
     report = {"schema_version": 2, "work_type": "travel_stay", "job_id": job_id, "space": job["space"],
               "criteria": criteria, "trip_groups": detail.get("travel_groups", []),
               "lodging_candidates": detail.get("travel_candidates", []), "photos": photos,
+              "external_evidence": detail.get("external_evidence", []),
               "attribution": "© OpenStreetMap contributors",
               "license": "OpenStreetMap data is available under the Open Database License (ODbL).",
               "note": "住宿候選、入住日期與旅行群組需人工核對。OpenStreetMap 結果只提供地點線索，不證明實際入住。"}
@@ -3898,6 +3907,7 @@ def download_travel_job_report(job_id: str):
                 lines.append(f"- {item['filename']}（ID {item['photo_id']}，{item.get('photo_date') or '拍攝日期未知'}；線索：{item['analysis'].get('lodging_evidence')}；人工狀態：{item['review']}）")
                 if item["analysis"].get("description"):
                     lines.append(f"  - {item['analysis']['description']}")
+        lines.extend(external_evidence_markdown(report))
         lines.extend(["", "地圖資料 attribution：© OpenStreetMap contributors (https://www.openstreetmap.org/copyright)"])
         response = Response("\n".join(lines), mimetype="text/markdown; charset=utf-8")
         response.headers["Content-Disposition"] = f'attachment; filename="travel-stay-{job_id[:8]}.md"'
@@ -3967,8 +3977,80 @@ def external_travel_markdown(report: dict) -> str:
                 photo = photos_by_id.get(photo_id, {})
                 lines.append(f"  - {photo.get('filename') or photo_id}（拍攝日 {photo.get('photo_date') or '未知'}）")
             lines.append("")
+    lines.extend(external_evidence_markdown(report))
     lines.extend(["", "地圖資料 attribution：© OpenStreetMap contributors (https://www.openstreetmap.org/copyright)"])
     return "\n".join(lines)
+
+
+def external_evidence_markdown(report):
+    evidence = report.get("external_evidence", [])
+    if not evidence:
+        return []
+    lines = ["", "## 外部住宿證據（待人工核對）", ""]
+    for item in evidence:
+        lines.append(f"- {item['hotel_name']} · {item['check_in']} 至 {item['check_out']} · {item['booking_status']} · {item['source']}:{item['source_reference']}")
+        if item.get("address"):
+            lines.append(f"  - 地址：{item['address']}")
+    return lines
+
+
+def read_external_evidence(db, job_id):
+    return [{"evidence_id": row["evidence_id"], **json.loads(row["payload_json"])}
+            for row in db.execute("SELECT evidence_id,payload_json FROM travel_external_evidence WHERE job_id=? ORDER BY created_at,evidence_id", (job_id,))]
+
+
+def normalize_external_evidence(body, criteria):
+    fields = {"source", "evidence_type", "hotel_name", "country", "city", "address",
+              "check_in", "check_out", "booking_status", "source_reference", "verification_status"}
+    if not isinstance(body, dict) or set(body) - fields:
+        raise ValueError("只接受結構化住宿證據欄位；不可傳送郵件內文或帳密。")
+    events = {"booking_confirmation": "booked", "check_in_confirmation": "checked_in",
+              "cancellation": "cancelled", "checkout_confirmation": "checked_out"}
+    if body.get("source") not in {"gmail", "travel_repo"} or body.get("evidence_type") not in events:
+        raise ValueError("來源或證據類型無效。")
+    if body.get("booking_status") != events[body["evidence_type"]]:
+        raise ValueError("訂房狀態與證據類型不一致。")
+    clean = {}
+    for key, limit in (("hotel_name", 160), ("country", 80), ("city", 120), ("address", 300), ("source_reference", 160)):
+        value = body.get(key, "")
+        if not isinstance(value, str) or len(value) > limit or any(ord(c) < 32 for c in value):
+            raise ValueError("證據欄位格式無效。")
+        clean[key] = value.strip()
+    if not all(clean[k] for k in ("hotel_name", "country", "source_reference")) or not re.fullmatch(r"[A-Za-z0-9._:/-]+", clean["source_reference"]):
+        raise ValueError("必須提供飯店、國家及不含個資的來源識別碼。")
+    if criteria.get("country") and canonical_travel_country(criteria["country"]) != canonical_travel_country(clean["country"]):
+        raise ValueError("證據國家與旅行工作不符。")
+    start, end = date.fromisoformat(body.get("check_in", "")), date.fromisoformat(body.get("check_out", ""))
+    if start >= end or (criteria.get("date_from") and end < date.fromisoformat(criteria["date_from"])) or (criteria.get("date_to") and start > date.fromisoformat(criteria["date_to"])):
+        raise ValueError("住宿日期無效或不在旅行工作範圍。")
+    if body.get("verification_status", "verified") != "verified":
+        raise ValueError("只匯入已由來源查證的證據。")
+    return {**clean, "source": body["source"], "evidence_type": body["evidence_type"],
+            "booking_status": body["booking_status"], "check_in": start.isoformat(), "check_out": end.isoformat(),
+            "verification_status": "verified", "review_status": "needs_review"}
+
+
+@app.route("/api/v1/jobs/<job_id>/external-evidence", methods=["GET", "POST"])
+def external_travel_evidence(job_id):
+    scopes = {"travel:analyze", "travel:evidence_write"} if request.method == "POST" else {"travel:analyze"}
+    auth, error = authenticate_job_api(scopes)
+    if error:
+        return error
+    with tag_job_db() as db:
+        job = get_tag_job(db, auth["owner_key"], job_id)
+        if not job or json.loads(job["criteria_json"]).get("work_type") != "travel_stay":
+            return jsonify({"ok": False, "error": "找不到此旅行住宿工作。"}), 404
+        if request.method == "GET":
+            return jsonify({"ok": True, "external_evidence": read_external_evidence(db, job_id)})
+        try:
+            evidence = normalize_external_evidence(request.get_json(silent=True), json.loads(job["criteria_json"]))
+        except (ValueError, TypeError):
+            return jsonify({"ok": False, "error": "外部證據格式、來源或日期無效。"}), 400
+        payload = json.dumps(evidence, ensure_ascii=False, sort_keys=True)
+        evidence_id = hashlib.sha256(payload.encode()).hexdigest()
+        cursor = db.execute("INSERT OR IGNORE INTO travel_external_evidence(job_id,evidence_id,payload_json,created_at) VALUES(?,?,?,?)",
+                            (job_id, evidence_id, payload, time.time()))
+        return jsonify({"ok": True, "evidence_id": evidence_id, "replayed": not bool(cursor.rowcount)}), 201 if cursor.rowcount else 200
 
 
 @app.post("/api/v1/jobs")
@@ -4086,6 +4168,7 @@ def get_external_travel_job(job_id: str):
     job = detail["job"]
     return jsonify({"ok": True, "job": job, "trip_groups": detail.get("travel_groups", []),
                     "lodging_candidates": detail.get("travel_candidates", []),
+                    "external_evidence": detail.get("external_evidence", []),
                     "photos": [{"photo_id": item["photo"].get("id"), "filename": item["photo"].get("filename"),
                                 "photo_date": item["photo"].get("photo_date"),
                                 "status": item.get("status"), "review": item.get("review"),
@@ -4119,6 +4202,7 @@ def get_external_travel_report(job_id: str):
     report = {"schema_version": 2, "work_type": "travel_stay", "job_id": job_id, "space": job["space"],
               "criteria": criteria, "trip_groups": detail.get("travel_groups", []),
               "lodging_candidates": detail.get("travel_candidates", []), "photos": photos,
+              "external_evidence": detail.get("external_evidence", []),
               "attribution": "© OpenStreetMap contributors",
               "license": "OpenStreetMap data is available under the Open Database License (ODbL).",
               "note": "住宿候選、入住日期與旅行群組需人工核對。OpenStreetMap 結果只提供地點線索，不證明實際入住。"}

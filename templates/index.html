@@ -2000,6 +2000,18 @@
         ? `狀態：${tagJobStatusText(job.status)}　候選 ${counts.candidates}　已分析 ${counts.analyzed}　待確認 ${items.filter(item => item.status === 'analyzed' && item.review === 'pending').length}　已確認 ${items.filter(item => item.review === 'accepted').length}　已排除 ${items.filter(item => item.review === 'rejected').length}　失敗 ${counts.failed}　唯讀`
         : `狀態：${tagJobStatusText(job.status)}　候選 ${counts.candidates}　候選排除已有 AI 輸出 ${job.skipped_processed_count || 0} 張　排除已標記新版 ${job.skipped_version_count || 0} 張　已分析 ${counts.analyzed}　已略過 ${counts.skipped}　分析失敗 ${counts.failed}　需核對 ${counts.needs_review}　已寫入 ${counts.written}　Dry run ${counts.dry_run}`;
       renderTravelStaySummary(job, payload.travel_groups || [], payload.travel_candidates || []);
+      if (isTravel && payload.external_evidence?.length) {
+        const external = document.createElement('section');
+        const title = document.createElement('h3');
+        title.textContent = '外部住宿證據（來源已查證、待人工核對）';
+        external.append(title);
+        for (const entry of payload.external_evidence) {
+          const line = document.createElement('p');
+          line.textContent = `${entry.hotel_name} · ${entry.check_in}–${entry.check_out} · ${entry.booking_status} · ${entry.source}:${entry.source_reference}${entry.address ? ' · ' + entry.address : ''}`;
+          external.append(line);
+        }
+        report.append(external);
+      }
       if (!job.snapshot_complete) {
         const limitNote = document.createElement('p');
         limitNote.className = 'tag-job-warning';

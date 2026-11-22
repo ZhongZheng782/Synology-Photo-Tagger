@@ -536,3 +536,11 @@ Llm-Cli-APIServer 的 `PHOTO_TAGGER_API_URL` 設為 Photo Tagger 的 HTTPS 根�
 | GET | /api/v1/catalog/sync/{run_id} | catalog:read |
 
 POST JSON 為 {"space":"personal"}，回傳 202 與 run_id；同步已執行則回 409，請查狀態避免重複觸發。失敗或中斷後可 POST 續跑。狀態包含 scanned_count、photo_count、next_offset、status、error 及 last_success_at；run_id 路由只查目前工作，未知或舊 ID 回 404。只在 status=complete 後建立旅行住宿工作。同步只寫入本機 metadata catalog，不修改照片或標籤，也不啟動 MLX。若受信任登入失效，需重新註冊；不要求或回傳帳密。
+
+### v0.4.29 — External Evidence API（UC-05/06）
+
+旅行助手在外部查閱 Gmail 或旅行 repo，僅送出最小結構化住宿事實；Photo Tagger 不持有 Gmail 認證、不接收郵件原文、訂單號、房號或入住密碼。GET /api/v1/jobs/{job_id}/external-evidence 需 travel:analyze；POST 同一路徑另需 travel:evidence_write（明確授權才開啟）。沿用 HTTPS、Job Bearer Token、帳號隔離及速率限制。
+
+POST JSON: {"source":"gmail","evidence_type":"booking_confirmation","hotel_name":"Example Hotel","country":"Japan","city":"Kyoto","check_in":"2026-11-12","check_out":"2026-11-16","booking_status":"booked","source_reference":"opaque-message-id","verification_status":"verified"}
+
+支援 booking_confirmation/booked、check_in_confirmation/checked_in、checkout_confirmation/checked_out、cancellation/cancelled；source 為 gmail 或 travel_repo，地址可選。證據日期須與工作範圍重疊。重送完全相同的正規化證據回 200，新增回 201；取消／改訂保留不同來源事件。所有證據仍為 needs_review，verified 是客戶端查證聲明，不能自動證明實際入住。UI、JSON／Markdown 報告均獨立列出外部證據，不覆蓋 AI 結果或照片標籤。自動衝突判斷與照片關聯留待後續。
