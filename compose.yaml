@@ -1,6 +1,6 @@
 services:
   synology-photo-tagger:
-    image: wenchiehlee1020/synology-photo-tagger:v0.4.30
+    image: wenchiehlee1020/synology-photo-tagger:v0.4.31
     build: .
     container_name: SYNOLOGY-PHOTO-TAGGER
     restart: unless-stopped
@@ -17,6 +17,8 @@ services:
       SYNOLOGY_URL: ${SYNOLOGY_URL:-}
       PHOTO_TAGGER_API_TOKEN: ${PHOTO_TAGGER_API_TOKEN:-}
       PHOTO_TAGGER_JOB_API_TOKEN: ${PHOTO_TAGGER_JOB_API_TOKEN:-}
+      PHOTO_TAGGER_HOTEL_TAG_API_TOKEN: ${PHOTO_TAGGER_HOTEL_TAG_API_TOKEN:-}
+      PHOTO_TAGGER_HOTEL_TAG_WRITE_ENABLED: ${PHOTO_TAGGER_HOTEL_TAG_WRITE_ENABLED:-false}
       PHOTO_TAGGER_JOB_API_SCOPES: ${PHOTO_TAGGER_JOB_API_SCOPES:-travel:analyze,travel:map_lookup,catalog:read,catalog:sync}
       MLX_SERVER_URL: ${MLX_SERVER_URL:-http://mac-mini.tail28f10.ts.net:5001}
       MLX_SERVER_API_KEY_FILE: /run/secrets/mlx-server-api-key

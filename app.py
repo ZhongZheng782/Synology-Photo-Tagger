@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.metadata
 import hashlib
+import hmac
 import ipaddress
 import io
 import json
@@ -59,7 +60,7 @@ API_INFO_PATHS = ("/webapi/query.cgi", "/photo/webapi/query.cgi")
 SESSION_TTL_SECONDS = 30 * 60
 NAS_SESSION_TTL_SECONDS = 12 * 60 * 60
 MAX_PAGE_SIZE = 100
-APP_VERSION = os.environ.get("APP_VERSION", "v0.4.30")
+APP_VERSION = os.environ.get("APP_VERSION", "v0.4.31")
 PHOTO_TAGGER_AI_PROFILE_VERSION = 1
 PHOTO_TAGGER_AI_VERSION_TAG = f"Photo Tagger AI v{PHOTO_TAGGER_AI_PROFILE_VERSION}"
 PHOTO_TAGGER_AI_VERSION_PATTERN = re.compile(r"^Photo Tagger AI v([0-9]+)$", re.IGNORECASE)
@@ -1391,10 +1392,11 @@ def metadata_api_session_context() -> tuple[str, str, NasSession] | None:
     return owner_key, nas_token, nas
 
 
-def authenticate_job_api(required_scopes: set[str]):
-    configured = PHOTO_TAGGER_JOB_API_TOKEN
+def authenticate_job_api(required_scopes: set[str], *, hotel_write: bool = False):
+    configured = (os.environ.get("PHOTO_TAGGER_HOTEL_TAG_API_TOKEN", "").strip()
+                  if hotel_write else PHOTO_TAGGER_JOB_API_TOKEN)
     metadata_token = os.environ.get("PHOTO_TAGGER_API_TOKEN", "").strip()
-    if len(configured) < 32 or configured == metadata_token:
+    if len(configured) < 32 or configured == metadata_token or (hotel_write and configured == PHOTO_TAGGER_JOB_API_TOKEN):
         return None, (jsonify({"ok": False, "error": "工作 API 尚未安全啟用。"}), 503)
     if not request.is_secure:
         return None, (jsonify({"ok": False, "error": "工作 API 僅允許 HTTPS。"}), 403)
@@ -1406,7 +1408,10 @@ def authenticate_job_api(required_scopes: set[str]):
     supplied_digest = hashlib.sha256(supplied_token.encode("utf-8")).digest()
     if not secrets.compare_digest(supplied_digest, configured_digest):
         return None, (jsonify({"ok": False, "error": "工作 API Token 無效。"}), 401)
-    if not required_scopes.issubset(PHOTO_TAGGER_JOB_API_SCOPES):
+    allowed_scopes = ({"travel:hotel_tag_write"} if hotel_write and
+                      os.environ.get("PHOTO_TAGGER_HOTEL_TAG_WRITE_ENABLED", "").lower() == "true"
+                      else set() if hotel_write else PHOTO_TAGGER_JOB_API_SCOPES - {"travel:hotel_tag_write"})
+    if not required_scopes.issubset(allowed_scopes):
         return None, (jsonify({"ok": False, "error": "工作 API Token 缺少必要 scope。"}), 403)
     account_context = metadata_api_owner_context()
     if not account_context:
@@ -1429,6 +1434,116 @@ def authenticate_job_api(required_scopes: set[str]):
             db.execute("UPDATE job_api_rate_limits SET request_count=request_count+1 WHERE token_fingerprint=?",
                        (fingerprint,))
     return {"owner_key": owner_key, "token_fingerprint": fingerprint}, None
+
+
+# Hotel tagging is intentionally isolated from the read-only travel job API.
+_hotel_tag_write_lock = threading.Lock()
+
+
+def hotel_tag_preview_signature(owner_key, plan, rows, expires):
+    message = json.dumps([owner_key, plan, rows, expires], sort_keys=True,
+                         ensure_ascii=False, separators=(",", ":")).encode()
+    return hmac.new(str(app.secret_key).encode(),
+                    message, hashlib.sha256).hexdigest()
+
+
+def hotel_tag_plan(body):
+    if not isinstance(body, dict) or body.get("confirmed") is not True:
+        raise ValueError("Confirmed lodging required")
+    name = body.get("hotel_name")
+    if not isinstance(name, str) or not name.strip() or len("Hotel: " + name.strip()) > 64 or any(ord(c) < 32 for c in name):
+        raise ValueError("Invalid hotel name")
+    start, end = date.fromisoformat(body["check_in"]), date.fromisoformat(body["check_out"])
+    if not 0 < (end - start).days <= 30:
+        raise ValueError("Invalid stay dates")
+    if any(isinstance(body.get(k), bool) for k in ("latitude", "longitude")):
+        raise ValueError("Invalid hotel coordinates")
+    lat, lon = float(body["latitude"]), float(body["longitude"])
+    ids = body.get("photo_ids")
+    if not isinstance(ids, list) or not 1 <= len(ids) <= 100 or any(type(i) is not int or i <= 0 for i in ids) or len(set(ids)) != len(ids):
+        raise ValueError("Require 1–100 unique positive photo IDs")
+    plan = dict(hotel_name=name.strip(), check_in=start.isoformat(), check_out=end.isoformat(),
+                latitude=lat, longitude=lon, photo_ids=sorted(ids))
+    if travel_gps_distance_m(plan, plan) is None or (lat == 0 and lon == 0):
+        raise ValueError("Invalid hotel coordinates")
+    return plan
+
+
+def hotel_tag_candidate(nas, plan, photo_id):
+    api = "SYNO.Foto.Browse.Item"
+    url, version = api_endpoint(nas, api)
+    data = post_synology(nas.client, url, {
+        "api": api, "version": version, "method": "get", "id": json.dumps([photo_id]),
+        "additional": json.dumps(["gps", "tag"]), "_sid": nas.sid,
+    }).get("data")
+    items = data.get("list") if isinstance(data, dict) else None
+    if not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], dict) or items[0].get("id") != photo_id:
+        raise SynologyApiError("Photo missing or inaccessible", 404)
+    item = item_summary(items[0])
+    taken = photo_taken_date(item)
+    distance = travel_gps_distance_m(item, plan)
+    tag = "Hotel: " + plan["hotel_name"]
+    tags = {t.casefold() for t in item["tags"] if isinstance(t, str)}
+    reason = None
+    if taken is None or not plan["check_in"] <= taken.isoformat() <= plan["check_out"]:
+        reason = "date_outside_stay"
+    elif distance is None or distance > 75 or (item["latitude"] == 0 and item["longitude"] == 0):
+        reason = "gps_missing_or_outside_radius"
+    elif any(t.startswith("hotel:") and t != tag.casefold() for t in tags):
+        reason = "conflicting_hotel_tag"
+    return dict(photo_id=photo_id, filename=item["filename"], date=taken.isoformat() if taken else None,
+                distance_m=round(distance, 3) if distance is not None else None,
+                eligible=reason is None, reason=reason, tag=tag)
+
+
+@app.post("/api/v1/hotel-tags/preview")
+@app.post("/api/v1/hotel-tags/apply")
+def hotel_tag_api():
+    auth, error = authenticate_job_api({"travel:hotel_tag_write"}, hotel_write=True)
+    if error:
+        return error
+    body = request.get_json(silent=True)
+    try:
+        plan = hotel_tag_plan(body)
+    except (ValueError, TypeError, KeyError, OverflowError):
+        return jsonify(ok=False, error="Invalid confirmed lodging or photo IDs"), 400
+    context = metadata_api_session_context()
+    if not context or context[0] != auth["owner_key"]:
+        return jsonify(ok=False, error="Trusted-device account unavailable"), 503
+    owner, nas_token, nas = context
+    applying = request.path.endswith("/apply")
+    with _hotel_tag_write_lock:
+        try:
+            rows = [hotel_tag_candidate(nas, plan, i) for i in plan["photo_ids"]]
+        except (SynologyApiError, requests.exceptions.RequestException):
+            return jsonify(ok=False, error="Cannot verify every photo"), 502
+        if not applying:
+            expires = int(time.time()) + 900
+            return jsonify(ok=True, rows=rows, radius_m=75, expires=expires,
+                           preview_token=hotel_tag_preview_signature(owner, plan, rows, expires))
+        expires, token = body.get("expires"), body.get("preview_token")
+        if (type(expires) is not int or not time.time() <= expires <= time.time() + 900
+                or not isinstance(token, str) or not secrets.compare_digest(
+                    token, hotel_tag_preview_signature(owner, plan, rows, expires))):
+            return jsonify(ok=False, error="Preview expired or photo metadata changed; preview again"), 409
+        results = []
+        for row in rows:
+            if not row["eligible"]:
+                results.append(dict(row, status="skipped"))
+                continue
+            try:
+                current = hotel_tag_candidate(nas, plan, row["photo_id"])
+                if current != row:
+                    results.append(dict(row, status="changed"))
+                    continue
+                written = call_job_write_route(nas_token, "personal", row["photo_id"], row["tag"])
+                verified = written.get("ok") is True and written.get("tags_verified") is True
+                results.append(dict(row, status=("added" if written.get("tags_added") else "already_present")
+                                    if verified else "unverified"))
+            except (SynologyApiError, requests.exceptions.RequestException):
+                results.append(dict(row, status="unverified"))
+        ok = all(r["status"] in {"added", "already_present", "skipped"} for r in results)
+        return jsonify(ok=ok, results=results), (200 if ok else 502)
 
 
 @app.get("/api/v1/metadata/photos")
